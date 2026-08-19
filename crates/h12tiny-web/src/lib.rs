@@ -1323,6 +1323,7 @@ pub struct Event {
     event: Option<String>,
     id: Option<String>,
     retry: Option<u64>,
+    comments: Vec<String>,
 }
 
 #[cfg(feature = "sse")]
@@ -1356,8 +1357,28 @@ impl Event {
         self
     }
 
+    /// Add an SSE comment (`:<text>`).
+    ///
+    /// Comments are ignored by SSE clients, which makes them suitable for
+    /// keeping an otherwise idle connection active. Newlines are rejected so
+    /// one comment cannot accidentally create additional SSE fields.
+    pub fn comment(mut self, comment: impl Into<String>) -> Self {
+        let comment = comment.into();
+        assert!(
+            !comment.contains(['\n', '\r']),
+            "SSE comments cannot contain newlines"
+        );
+        self.comments.push(comment);
+        self
+    }
+
     fn encode(&self) -> Bytes {
         let mut output = String::new();
+        for comment in &self.comments {
+            output.push(':');
+            output.push_str(comment);
+            output.push('\n');
+        }
         if let Some(data) = &self.data {
             for line in data.split('\n') {
                 output.push_str("data: ");
@@ -1407,6 +1428,147 @@ where
     }
 }
 
+#[cfg(feature = "sse")]
+trait KeepAliveItem: IntoSseEvent {
+    fn keep_alive(event: Event) -> Self;
+}
+
+#[cfg(feature = "sse")]
+impl KeepAliveItem for Event {
+    fn keep_alive(event: Event) -> Self {
+        event
+    }
+}
+
+#[cfg(feature = "sse")]
+impl<E> KeepAliveItem for Result<Event, E>
+where
+    E: StdError + Send + Sync + 'static,
+{
+    fn keep_alive(event: Event) -> Self {
+        Ok(event)
+    }
+}
+
+/// Configuration for periodic SSE comment frames.
+#[cfg(feature = "sse")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeepAlive {
+    event: Event,
+    interval: Duration,
+}
+
+#[cfg(feature = "sse")]
+impl KeepAlive {
+    /// Construct a keepalive that emits an empty comment every 15 seconds.
+    pub fn new() -> Self {
+        Self {
+            event: Event::default().comment(""),
+            interval: Duration::from_secs(15),
+        }
+    }
+
+    /// Set the maximum idle interval between keepalive comments.
+    pub fn interval(mut self, interval: Duration) -> Self {
+        assert!(!interval.is_zero(), "SSE keepalive interval must be non-zero");
+        self.interval = interval;
+        self
+    }
+
+    /// Set the text of the keepalive comment.
+    ///
+    /// The text cannot contain a newline or carriage return because those
+    /// characters would make it more than one SSE comment.
+    pub fn text(self, text: impl AsRef<str>) -> Self {
+        self.event(Event::default().comment(text.as_ref()))
+    }
+
+    /// Set the complete event emitted as the keepalive frame.
+    ///
+    /// The default event is an empty SSE comment. Applications should use
+    /// [`KeepAlive::text`] when only comment text needs to change.
+    pub fn event(mut self, event: Event) -> Self {
+        self.event = event;
+        self
+    }
+
+    fn event_value(&self) -> Event {
+        self.event.clone()
+    }
+}
+
+#[cfg(feature = "sse")]
+impl Default for KeepAlive {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A stream wrapper that inserts comment frames when its source is idle.
+#[cfg(feature = "sse")]
+pub struct KeepAliveStream<S> {
+    inner: S,
+    timer: async_io::Timer,
+    keep_alive: KeepAlive,
+}
+
+#[cfg(feature = "sse")]
+impl<S> KeepAliveStream<S> {
+    /// Wrap a stream with the supplied keepalive policy.
+    pub fn new(inner: S, keep_alive: KeepAlive) -> Self {
+        let interval = keep_alive.interval;
+        Self {
+            inner,
+            timer: async_io::Timer::after(interval),
+            keep_alive,
+        }
+    }
+
+    fn reset_timer(&mut self) {
+        self.timer.set_after(self.keep_alive.interval);
+    }
+}
+
+#[cfg(feature = "sse")]
+impl<S> futures_util::Stream for KeepAliveStream<S>
+where
+    S: futures_util::Stream,
+    S::Item: KeepAliveItem,
+{
+    type Item = S::Item;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        // `inner` is pinned for the lifetime of this wrapper. The timer and
+        // policy are not pinned fields and are only accessed in place.
+        // SAFETY: projecting the pinned wrapper to `inner` never moves it;
+        // `inner` remains pinned until this wrapper is dropped. The timer and
+        // keepalive policy are accessed in place and are not pinned fields.
+        let this = unsafe { self.get_unchecked_mut() };
+        let inner = unsafe { Pin::new_unchecked(&mut this.inner) };
+
+        // Upstream activity wins if it becomes ready in the same poll as the
+        // timer. This both preserves stream ordering and resets idle time from
+        // the activity that actually reached the response.
+        match inner.poll_next(cx) {
+            Poll::Ready(Some(item)) => {
+                this.reset_timer();
+                Poll::Ready(Some(item))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => match Pin::new(&mut this.timer).poll(cx) {
+                Poll::Ready(_) => {
+                    this.reset_timer();
+                    Poll::Ready(Some(S::Item::keep_alive(this.keep_alive.event_value())))
+                }
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+}
+
 /// A streaming SSE response.
 #[cfg(feature = "sse")]
 pub struct Sse<S> {
@@ -1418,6 +1580,13 @@ impl<S> Sse<S> {
     /// Wrap a stream of [`Event`] values or `Result<Event, E>` values.
     pub fn new(stream: S) -> Self {
         Self { stream }
+    }
+
+    /// Insert comment frames whenever the upstream stream is idle.
+    pub fn keep_alive(self, keep_alive: KeepAlive) -> Sse<KeepAliveStream<S>> {
+        Sse {
+            stream: KeepAliveStream::new(self.stream, keep_alive),
+        }
     }
 }
 
@@ -1686,5 +1855,71 @@ mod tests {
         assert_eq!(&event.encode()[..], b"data: one\ndata: two\nevent: message\nid: 1\nretry: 5000\n\n");
         let response = Sse::new(futures_util::stream::iter(vec![event])).into_response();
         assert_eq!(response.headers()[CONTENT_TYPE], "text/event-stream");
+    }
+
+    #[cfg(feature = "sse")]
+    #[test]
+    fn sse_keepalive_emits_comments_only_when_upstream_is_idle() {
+        use futures_lite::future::poll_once;
+        use futures_util::StreamExt;
+        use std::convert::Infallible;
+
+        let source = futures_util::stream::once(async {
+            Ok::<_, Infallible>(Event::new().data("first"))
+        })
+        .chain(futures_util::stream::pending());
+        let response = Sse::new(source)
+            .keep_alive(KeepAlive::new().interval(Duration::from_millis(15)).text("tick"))
+            .into_response();
+        let mut data = response.into_body().into_data_stream();
+
+        assert_eq!(block_on(data.next()).unwrap().unwrap(), Bytes::from_static(b"data: first\n\n"));
+        assert!(block_on(poll_once(data.next())).is_none());
+        assert_eq!(block_on(data.next()).unwrap().unwrap(), Bytes::from_static(b":tick\n\n"));
+    }
+
+    #[cfg(feature = "sse")]
+    #[test]
+    #[should_panic(expected = "non-zero")]
+    fn sse_keepalive_rejects_zero_interval() {
+        let _ = KeepAlive::default().interval(Duration::ZERO);
+    }
+
+    #[cfg(feature = "sse")]
+    #[test]
+    fn sse_keepalive_preserves_upstream_cancellation() {
+        use futures_lite::future::poll_once;
+        use futures_util::{Stream, StreamExt};
+        use std::convert::Infallible;
+        use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+
+        struct PendingStream(Arc<AtomicBool>);
+
+        impl Stream for PendingStream {
+            type Item = Result<Event, Infallible>;
+
+            fn poll_next(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                Poll::Pending
+            }
+        }
+
+        impl Drop for PendingStream {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let response = Sse::new(PendingStream(dropped.clone()))
+            .keep_alive(KeepAlive::new().interval(Duration::from_secs(60)))
+            .into_response();
+        let mut data = response.into_body().into_data_stream();
+        assert!(block_on(poll_once(data.next())).is_none());
+        drop(data);
+
+        assert!(dropped.load(Ordering::SeqCst));
     }
 }

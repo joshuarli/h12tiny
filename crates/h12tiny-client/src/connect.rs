@@ -2,17 +2,26 @@
 //!
 //! This is intentionally a small replacement for Hyper-util's Tokio
 //! `HttpConnector`: no proxy discovery, socket tuning, interface binding, or
-//! platform TLS. `async-net` resolves and connects the origin, while Rustls
-//! authenticates HTTPS and selects the application protocol with ALPN.
+//! platform TLS. The default path resolves names with the standard library and
+//! connects sockets with `async-io`; Rustls authenticates HTTPS and selects the
+//! application protocol with ALPN.
+//!
+//! The standard library resolver is synchronous, so name resolution can block
+//! the task that first polls a default connection. This is deliberate: the
+//! client does not create or depend on a process-global blocking worker pool.
+//! Applications that need asynchronous or otherwise specialized DNS should use
+//! [`Dialer`] to replace the complete establishment sequence.
 
 use std::error::Error as StdError;
 use std::fmt;
 use std::future::Future;
+use std::io;
+use std::net::{TcpStream as StdTcpStream, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_net::TcpStream;
+use async_io::Async;
 use futures_util::future::{self, Either};
 use http::Uri;
 use hyper::rt::Timer;
@@ -251,7 +260,7 @@ impl Connector {
         let scheme = uri.scheme_str().ok_or_else(|| Error::UnsupportedScheme("".to_owned()))?;
         match scheme {
             "http" => {
-                let stream = TcpStream::connect((host.as_str(), uri.port_u16().unwrap_or(80)))
+                let stream = connect_tcp(&host, uri.port_u16().unwrap_or(80))
                     .await
                     .map_err(Error::Connect)?;
                 Ok(Connected {
@@ -275,9 +284,7 @@ impl Connector {
         port: u16,
         require_h2: bool,
     ) -> Result<Connected, Error> {
-        let stream = TcpStream::connect((host.as_str(), port))
-            .await
-            .map_err(Error::Connect)?;
+        let stream = connect_tcp(&host, port).await.map_err(Error::Connect)?;
         let server_name = futures_rustls::pki_types::ServerName::try_from(host.clone())
             .map_err(|_| Error::InvalidServerName(host))?;
         let tls = self.tls.connect(server_name, stream).await.map_err(Error::Tls)?;
@@ -304,6 +311,29 @@ impl Connector {
     }
 }
 
+/// Resolves an origin synchronously, then establishes each candidate socket
+/// asynchronously until one succeeds. Keeping resolution here, rather than
+/// using `async-net`, avoids its process-global `blocking` worker pool while
+/// preserving async TCP connect and cancellation after resolution completes.
+async fn connect_tcp(host: &str, port: u16) -> io::Result<Async<StdTcpStream>> {
+    let mut last_error = None;
+    let mut addresses = (host, port).to_socket_addrs()?;
+
+    while let Some(address) = addresses.next() {
+        match Async::<StdTcpStream>::connect(address).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "could not connect to any of the addresses",
+        )
+    }))
+}
+
 impl ConnectorBuilder {
     /// Replaces the default DNS/TCP/TLS establishment sequence.
     pub fn dialer<D>(mut self, dialer: D) -> Self
@@ -314,8 +344,12 @@ impl ConnectorBuilder {
         self
     }
 
-    /// Limits DNS, TCP, and TLS establishment. It does not limit a request,
-    /// response headers, or a response body.
+    /// Limits connection establishment after the default resolver yields,
+    /// including TCP and TLS. The default resolver uses synchronous
+    /// `ToSocketAddrs`, so this timer cannot preempt a DNS lookup that blocks
+    /// while its future is first polled. Use [`ConnectorBuilder::dialer`] for
+    /// asynchronous DNS that must be covered by cancellation and this timer.
+    /// This does not limit a request, response headers, or a response body.
     pub fn connect_timeout(mut self, timeout: Duration) -> Self {
         self.connector.connect_timeout = Some(timeout);
         self
@@ -347,7 +381,15 @@ impl ConnectorBuilder {
 #[cfg(feature = "tls")]
 fn default_tls_config() -> rustls::ClientConfig {
     let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let mut config = rustls::ClientConfig::builder()
+    // h12tiny selects the provider it was compiled to use instead of relying on
+    // Rustls' process-global provider choice. Applications that also include a
+    // server stack may enable a different provider (for example aws-lc-rs);
+    // `ClientConfig::builder()` would then panic before the caller can even use
+    // a plaintext origin. The connector's TLS policy stays local and explicit.
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let mut config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("ring supports Rustls' safe default protocol versions")
         .with_root_certificates(roots)
         .with_no_client_auth();
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
@@ -356,6 +398,7 @@ fn default_tls_config() -> rustls::ClientConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -400,6 +443,20 @@ mod tests {
             .build();
         let result = smol::block_on(connector.connect("http://example.test/".parse().unwrap(), false));
         assert!(matches!(result, Err(Error::Timeout)));
+    }
+
+    #[test]
+    fn default_tcp_connector_resolves_and_connects_without_async_net() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let connector = Connector::new();
+        let connected = smol::block_on(connector.connect(
+            format!("http://127.0.0.1:{port}/").parse().unwrap(),
+            false,
+        ))
+        .unwrap();
+
+        assert_eq!(connected.protocol, super::super::ConnectionProtocol::Http1);
     }
 
     #[cfg(feature = "tls")]
