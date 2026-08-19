@@ -12,7 +12,7 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -39,7 +39,10 @@ pub struct Error {
 #[non_exhaustive]
 pub enum ErrorKind {
     Canceled,
+    UnsupportedScheme,
     Connect,
+    Tls,
+    Alpn,
     Handshake,
     SendRequest,
     UnsupportedMethod,
@@ -69,7 +72,10 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self.kind {
             ErrorKind::Canceled => "request was cancelled before it could be sent",
+            ErrorKind::UnsupportedScheme => "request URI scheme is unsupported",
             ErrorKind::Connect => "connection establishment failed",
+            ErrorKind::Tls => "TLS negotiation or certificate validation failed",
+            ErrorKind::Alpn => "TLS ALPN did not select an allowed HTTP protocol",
             ErrorKind::Handshake => "HTTP connection handshake failed",
             ErrorKind::SendRequest => "request dispatch failed",
             ErrorKind::UnsupportedMethod => "request method is unsupported for this HTTP version",
@@ -88,6 +94,78 @@ impl StdError for Error {
     }
 }
 
+/// Protocol selected for a client connection event.
+///
+/// This is intentionally separate from Hyper's version type: it describes a
+/// reusable endpoint session, not an individual request or response message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ConnectionProtocol {
+    Http1,
+    Http2,
+}
+
+impl From<ConnectedProtocol> for ConnectionProtocol {
+    fn from(protocol: ConnectedProtocol) -> Self {
+        match protocol {
+            ConnectedProtocol::Http1 => Self::Http1,
+            ConnectedProtocol::Http2 => Self::Http2,
+        }
+    }
+}
+
+/// A discrete endpoint-lifecycle observation recorded by [`DebugEventLog`].
+///
+/// Events are best-effort development diagnostics. They do not establish a
+/// request-success guarantee and are deliberately not a metrics framework.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DebugEvent {
+    PoolCheckout { origin: String },
+    ConnectionEstablished { origin: String, protocol: ConnectionProtocol },
+    AlpnSelected { origin: String, protocol: ConnectionProtocol },
+    ConnectionPooled { origin: String },
+    PoolEvicted { origin: String },
+    ConnectionClosed { origin: String },
+    StaleRetry { origin: String },
+}
+
+/// An opt-in, dependency-free sink for client connection lifecycle events.
+///
+/// Clone this before passing it to [`Builder::debug_event_log`], then call
+/// [`DebugEventLog::drain`] from a test harness or debugging control path.
+/// It is intentionally pull-based: event recording never runs application
+/// callbacks while the connection pool mutex is held.
+#[derive(Clone, Default)]
+pub struct DebugEventLog(Arc<Mutex<Vec<DebugEvent>>>);
+
+impl DebugEventLog {
+    /// Returns and clears all observations recorded since the previous drain.
+    pub fn drain(&self) -> Vec<DebugEvent> {
+        std::mem::take(&mut *self.0.lock().expect("debug event log mutex poisoned"))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0
+            .lock()
+            .expect("debug event log mutex poisoned")
+            .is_empty()
+    }
+
+    pub(crate) fn record(&self, event: DebugEvent) {
+        self.0
+            .lock()
+            .expect("debug event log mutex poisoned")
+            .push(event);
+    }
+}
+
+impl fmt::Debug for DebugEventLog {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("DebugEventLog").finish_non_exhaustive()
+    }
+}
+
 /// A cheaply cloneable client. Clones share one per-origin pool and one TLS
 /// policy. H2 origin coalescing is intentionally not implemented.
 pub struct Client<B> {
@@ -98,6 +176,7 @@ pub struct Client<B> {
     h1_builder: hyper::client::conn::http1::Builder,
     #[cfg(feature = "http2")]
     h2_builder: hyper::client::conn::http2::Builder<BoxExecutor>,
+    debug_events: Option<DebugEventLog>,
     pool: pool::Pool<PoolClient<B>, PoolKey>,
 }
 
@@ -202,6 +281,11 @@ where
                     if !self.config.retry_canceled_requests || !reused {
                         return Err(error);
                     }
+                    if let Some(events) = &self.debug_events {
+                        events.record(DebugEvent::StaleRetry {
+                            origin: normalize::pool_key_origin(&key),
+                        });
+                    }
                     request = returned_request;
                     *request.uri_mut() = absolute_uri.clone();
                 }
@@ -304,15 +388,33 @@ where
         &self,
         key: PoolKey,
     ) -> Result<pool::Pooled<PoolClient<B>, PoolKey>, Error> {
+        let origin = normalize::pool_key_origin(&key);
         let mut connecting = self
             .pool
             .connecting(&key, self.config.protocol)
             .ok_or_else(|| Error::new(ErrorKind::Canceled))?;
-        let connected = self
+        let connected = match self
             .connector
             .connect(normalize::pool_key_uri(key.clone()), self.config.protocol == PoolProtocol::Http2)
             .await
-            .map_err(|error| Error::with_source(ErrorKind::Connect, error))?;
+        {
+            Ok(connected) => connected,
+            Err(error) => {
+                let kind = error.client_error_kind();
+                return Err(Error::with_source(kind, error));
+            }
+        };
+
+        if let Some(events) = &self.debug_events {
+            let protocol = ConnectionProtocol::from(connected.protocol);
+            events.record(DebugEvent::ConnectionEstablished {
+                origin: origin.clone(),
+                protocol,
+            });
+            if key.0 == http::uri::Scheme::HTTPS {
+                events.record(DebugEvent::AlpnSelected { origin, protocol });
+            }
+        }
 
         if connected.protocol == ConnectedProtocol::Http2 && self.config.protocol != PoolProtocol::Http2 {
             connecting = connecting
@@ -390,6 +492,7 @@ impl<B> Clone for Client<B> {
             h1_builder: self.h1_builder.clone(),
             #[cfg(feature = "http2")]
             h2_builder: self.h2_builder.clone(),
+            debug_events: self.debug_events.clone(),
             pool: self.pool.clone(),
         }
     }
@@ -522,6 +625,7 @@ pub struct Builder {
     h2_builder: hyper::client::conn::http2::Builder<BoxExecutor>,
     pool_config: pool::Config,
     pool_timer: Option<Arc<dyn hyper::rt::Timer + Send + Sync>>,
+    debug_events: Option<DebugEventLog>,
 }
 
 impl Builder {
@@ -555,6 +659,7 @@ impl Builder {
                 max_idle_per_host: usize::MAX,
             },
             pool_timer: Some(Arc::new(AsyncIoTimer)),
+            debug_events: None,
         }
     }
 
@@ -584,6 +689,14 @@ impl Builder {
         self
     }
 
+    /// Records endpoint lifecycle transitions in `log` without adding a
+    /// logging-framework dependency. The caller retains a clone and drains
+    /// it when inspection is useful.
+    pub fn debug_event_log(&mut self, log: DebugEventLog) -> &mut Self {
+        self.debug_events = Some(log);
+        self
+    }
+
     pub fn set_host(&mut self, enabled: bool) -> &mut Self {
         self.config.set_host = enabled;
         self
@@ -605,6 +718,7 @@ impl Builder {
     }
 
     pub fn build<B>(self) -> Client<B> {
+        let debug_events = self.debug_events;
         Client {
             config: self.config,
             connector: self.connector,
@@ -613,7 +727,8 @@ impl Builder {
             h1_builder: self.h1_builder,
             #[cfg(feature = "http2")]
             h2_builder: self.h2_builder,
-            pool: pool::Pool::new(self.pool_config, self.executor, self.pool_timer),
+            debug_events: debug_events.clone(),
+            pool: pool::Pool::new(self.pool_config, self.executor, self.pool_timer, debug_events),
         }
     }
 }

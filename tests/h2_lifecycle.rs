@@ -1,0 +1,237 @@
+#![cfg(all(feature = "client", feature = "server", feature = "http2"))]
+
+mod support;
+
+use std::convert::Infallible;
+use std::future::Future;
+use std::pin::Pin;
+use std::time::Duration;
+
+use async_net::TcpListener;
+use futures_channel::oneshot;
+use futures_util::future;
+use h12tiny::client::{Client, ErrorKind};
+use h12tiny::io::FuturesIo;
+use h12tiny::runtime::BoxExecutor;
+use h12tiny::server::conn::auto;
+use http::{Request, Response, StatusCode};
+use hyper::body::Incoming;
+use hyper::service::Service;
+use support::{collect, ConnectionCounters, CounterSnapshot, FullBody, SmolExecutor};
+
+#[derive(Clone)]
+struct DelayService {
+    counters: ConnectionCounters,
+}
+
+impl Service<Request<Incoming>> for DelayService {
+    type Response = Response<FullBody>;
+    type Error = Infallible;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn call(&self, request: Request<Incoming>) -> Self::Future {
+        self.counters.request_started();
+        let slow = request.uri().path() == "/slow";
+        Box::pin(async move {
+            let _ = collect(request.into_body()).await;
+            if slow {
+                async_io::Timer::after(Duration::from_millis(100)).await;
+            }
+            Ok(Response::new(FullBody::from_static(if slow { b"slow" } else { b"fast" })))
+        })
+    }
+}
+
+#[test]
+fn cancelling_one_h2_response_future_does_not_poison_the_shared_session() {
+    smol::block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let counters = ConnectionCounters::default();
+        let server_counters = counters.clone();
+        let server = smol::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            server_counters.tcp_opened();
+            server_counters.h2_opened();
+            auto::Builder::new(BoxExecutor::new(SmolExecutor))
+                .serve_connection(
+                    FuturesIo::new(stream),
+                    DelayService {
+                        counters: server_counters,
+                    },
+                )
+                .await
+                .unwrap();
+        });
+
+        let mut builder = Client::builder(SmolExecutor);
+        builder.http2_only(true);
+        let client = builder.build::<FullBody>();
+        let warm = client
+            .request(
+                Request::builder()
+                    .uri(format!("http://{address}/warm"))
+                    .body(FullBody::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(collect(warm.into_body()).await, b"fast");
+
+        let slow = smol::spawn(client.clone().request(
+            Request::builder()
+                .uri(format!("http://{address}/slow"))
+                .body(FullBody::empty())
+                .unwrap(),
+        ));
+        for _ in 0..100 {
+            if counters.snapshot().logical_requests >= 2 {
+                break;
+            }
+            async_io::Timer::after(Duration::from_millis(1)).await;
+        }
+        assert_eq!(counters.snapshot().logical_requests, 2);
+        drop(slow);
+
+        let fast = client
+            .request(
+                Request::builder()
+                    .uri(format!("http://{address}/fast"))
+                    .body(FullBody::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fast.status(), StatusCode::OK);
+        assert_eq!(collect(fast.into_body()).await, b"fast");
+
+        // Give the cancelled handler time to observe the reset and finish;
+        // only the stream is cancelled, not its H2 connection.
+        async_io::Timer::after(Duration::from_millis(120)).await;
+        drop(client);
+        server.await;
+        assert_eq!(
+            counters.snapshot(),
+            CounterSnapshot {
+                tcp_connections: 1,
+                tls_handshakes: 0,
+                h1_connections: 0,
+                h2_sessions: 1,
+                logical_requests: 3,
+            }
+        );
+    });
+}
+
+#[test]
+fn closed_h2_session_is_evicted_and_the_next_request_reconnects() {
+    smol::block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let counters = ConnectionCounters::default();
+        let server_counters = counters.clone();
+        let (close_first_tx, close_first_rx) = oneshot::channel();
+        let (first_closed_tx, first_closed_rx) = oneshot::channel();
+        let server = smol::spawn(async move {
+            let (first, _) = listener.accept().await.unwrap();
+            server_counters.tcp_opened();
+            server_counters.h2_opened();
+            let first_builder = auto::Builder::new(BoxExecutor::new(SmolExecutor));
+            let first_connection = Box::pin(
+                first_builder
+                    .serve_connection(
+                        FuturesIo::new(first),
+                        DelayService {
+                            counters: server_counters.clone(),
+                        },
+                    )
+                    .into_owned(),
+            );
+            let close = Box::pin(async move {
+                let _ = close_first_rx.await;
+            });
+            let mut first_connection = match future::select(first_connection, close).await {
+                future::Either::Left((result, _)) => {
+                    result.unwrap();
+                    return;
+                }
+                future::Either::Right(((), connection)) => connection,
+            };
+            // Send GOAWAY while retaining the driver long enough to put it on
+            // the wire. The client must stop using its shared sender and make
+            // the second request on a replacement session.
+            first_connection.as_mut().graceful_shutdown();
+            let _ = first_closed_tx.send(());
+            smol::spawn(async move {
+                let _ = first_connection.await;
+            })
+            .detach();
+
+            let (second, _) = listener.accept().await.unwrap();
+            server_counters.tcp_opened();
+            server_counters.h2_opened();
+            auto::Builder::new(BoxExecutor::new(SmolExecutor))
+                .serve_connection(
+                    FuturesIo::new(second),
+                    DelayService {
+                        counters: server_counters,
+                    },
+                )
+                .await
+                .unwrap();
+        });
+
+        let mut builder = Client::builder(SmolExecutor);
+        builder.http2_only(true);
+        let client = builder.build::<FullBody>();
+        let first = client
+            .request(
+                Request::builder()
+                    .uri(format!("http://{address}/first"))
+                    .body(FullBody::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(collect(first.into_body()).await, b"fast");
+        close_first_tx.send(()).unwrap();
+        first_closed_rx.await.unwrap();
+
+        let goaway = client
+            .request(
+                Request::builder()
+                    .uri(format!("http://{address}/goaway"))
+                    .body(FullBody::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap_err();
+        // A GOAWAY does not prove whether this stream reached the peer, so
+        // the client must surface it instead of blindly replaying the
+        // request. It must, however, evict that dead shared session so later
+        // work reconnects.
+        assert_eq!(goaway.kind(), ErrorKind::SendRequest);
+        let replacement = client
+            .request(
+                Request::builder()
+                    .uri(format!("http://{address}/replacement"))
+                    .body(FullBody::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(collect(replacement.into_body()).await, b"fast");
+        drop(client);
+        server.await;
+        assert_eq!(
+            counters.snapshot(),
+            CounterSnapshot {
+                tcp_connections: 2,
+                tls_handshakes: 0,
+                h1_connections: 0,
+                h2_sessions: 2,
+                logical_requests: 2,
+            }
+        );
+    });
+}

@@ -21,6 +21,17 @@ http1 = ["hyper/http1"]
 http2 = ["hyper/http2"]
 tls = ["dep:futures-rustls", "dep:rustls", "dep:webpki-roots"]
 
+# These are runnable integration tools rather than protocol-only examples.
+# Keep feature-minimal library builds useful without trying to compile their
+# networking/TLS surfaces.
+[[example]]
+name = "interop-server"
+required-features = ["server", "http1", "http2", "tls"]
+
+[[example]]
+name = "client-load"
+required-features = ["client", "http1", "http2", "tls"]
+
 [dependencies]
 # Protocol and message types are shared by all feature combinations.  Hyper is
 # always present for its runtime-neutral traits; http1/http2 select its protocol

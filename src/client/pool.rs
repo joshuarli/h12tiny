@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use futures_channel::oneshot;
 use futures_util::future;
 
+use super::{DebugEvent, DebugEventLog};
 use crate::runtime::BoxExecutor;
 
 /// An item that can participate in a pool. The pool knows no protocol
@@ -29,8 +30,24 @@ pub(crate) trait Poolable: Unpin + Send + Sized + 'static {
     fn can_share(&self) -> bool;
 }
 
-pub(crate) trait Key: Eq + Hash + Clone + Debug + Unpin + Send + 'static {}
-impl<T> Key for T where T: Eq + Hash + Clone + Debug + Unpin + Send + 'static {}
+pub(crate) trait Key: Eq + Hash + Clone + Debug + Unpin + Send + 'static {
+    /// Produces the endpoint identity shown by a development event. This is a
+    /// pool boundary rather than a `Debug` rendering so events remain useful
+    /// when a key's internal representation changes.
+    fn origin(&self) -> String;
+}
+
+impl Key for super::normalize::PoolKey {
+    fn origin(&self) -> String {
+        super::normalize::pool_key_origin(self)
+    }
+}
+
+impl Key for String {
+    fn origin(&self) -> String {
+        self.clone()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Protocol {
@@ -62,6 +79,7 @@ impl Config {
 /// is zero. That is the legacy client's observable contract.
 pub(crate) struct Pool<T, K: Key> {
     inner: Option<Arc<Mutex<Inner<T, K>>>>,
+    debug_events: Option<DebugEventLog>,
 }
 
 struct Inner<T, K: Key> {
@@ -75,6 +93,7 @@ struct Inner<T, K: Key> {
     executor: BoxExecutor,
     timer: Option<Arc<dyn hyper::rt::Timer + Send + Sync>>,
     timeout: Option<Duration>,
+    debug_events: Option<DebugEventLog>,
 }
 
 impl<T, K: Key> Pool<T, K> {
@@ -82,6 +101,7 @@ impl<T, K: Key> Pool<T, K> {
         config: Config,
         executor: BoxExecutor,
         timer: Option<Arc<dyn hyper::rt::Timer + Send + Sync>>,
+        debug_events: Option<DebugEventLog>,
     ) -> Self {
         let inner = config.enabled().then(|| {
             Arc::new(Mutex::new(Inner {
@@ -93,9 +113,10 @@ impl<T, K: Key> Pool<T, K> {
                 executor,
                 timer,
                 timeout: config.idle_timeout,
+                debug_events: debug_events.clone(),
             }))
         });
-        Self { inner }
+        Self { inner, debug_events }
     }
 
     pub(crate) fn is_enabled(&self) -> bool {
@@ -105,6 +126,11 @@ impl<T, K: Key> Pool<T, K> {
 
 impl<T: Poolable, K: Key> Pool<T, K> {
     pub(crate) fn checkout(&self, key: K) -> Checkout<T, K> {
+        if let Some(events) = &self.debug_events {
+            events.record(DebugEvent::PoolCheckout {
+                origin: key.origin(),
+            });
+        }
         Checkout {
             key,
             pool: self.clone(),
@@ -144,8 +170,15 @@ impl<T: Poolable, K: Key> Pool<T, K> {
                 #[cfg(feature = "http2")]
                 Reservation::Shared(to_insert, to_return) => {
                     let mut locked = inner.lock().expect("pool mutex poisoned");
-                    locked.put(connecting.key.clone(), to_insert, inner);
+                    let pooled = locked.put(connecting.key.clone(), to_insert, inner);
                     locked.connected(&connecting.key);
+                    if pooled {
+                        if let Some(events) = &self.debug_events {
+                            events.record(DebugEvent::ConnectionPooled {
+                                origin: connecting.key.origin(),
+                            });
+                        }
+                    }
                     connecting.pool = WeakOpt::none();
                     (to_return, WeakOpt::none())
                 }
@@ -158,6 +191,7 @@ impl<T: Poolable, K: Key> Pool<T, K> {
             is_reused: false,
             key: connecting.key.clone(),
             pool,
+            debug_events: self.debug_events.clone(),
         }
     }
 
@@ -172,6 +206,7 @@ impl<T: Poolable, K: Key> Pool<T, K> {
             is_reused: true,
             key: key.clone(),
             pool,
+            debug_events: self.debug_events.clone(),
         }
     }
 }
@@ -180,6 +215,7 @@ impl<T, K: Key> Clone for Pool<T, K> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            debug_events: self.debug_events.clone(),
         }
     }
 }
@@ -194,10 +230,20 @@ struct IdlePopper<'a, T, K> {
     list: &'a mut Vec<Idle<T>>,
 }
 
-impl<T: Poolable, K: Debug> IdlePopper<'_, T, K> {
-    fn pop(self, expiration: Expiration, now: Instant) -> Option<Idle<T>> {
+impl<T: Poolable, K: Key> IdlePopper<'_, T, K> {
+    fn pop(
+        self,
+        expiration: Expiration,
+        now: Instant,
+        debug_events: Option<&DebugEventLog>,
+    ) -> Option<Idle<T>> {
         while let Some(entry) = self.list.pop() {
             if !entry.value.is_open() || expiration.expires(entry.idle_at, now) {
+                if let Some(events) = debug_events {
+                    events.record(DebugEvent::PoolEvicted {
+                        origin: self._key.origin(),
+                    });
+                }
                 continue;
             }
             let value = match entry.value.reserve() {
@@ -225,9 +271,9 @@ impl<T: Poolable, K: Key> Inner<T, K> {
         self.timer.as_ref().map_or_else(Instant::now, |timer| timer.now())
     }
 
-    fn put(&mut self, key: K, value: T, pool: &Arc<Mutex<Self>>) {
+    fn put(&mut self, key: K, value: T, pool: &Arc<Mutex<Self>>) -> bool {
         if value.can_share() && self.idle.contains_key(&key) {
-            return;
+            return false;
         }
 
         let mut value = Some(value);
@@ -262,13 +308,16 @@ impl<T: Poolable, K: Key> Inner<T, K> {
             let now = self.now();
             let list = self.idle.entry(key).or_default();
             if list.len() >= self.max_idle_per_host {
-                return;
+                return false;
             }
             list.push(Idle {
                 value,
                 idle_at: now,
             });
             self.spawn_idle_interval(pool);
+            true
+        } else {
+            true
         }
     }
 
@@ -297,9 +346,19 @@ impl<T: Poolable, K: Key> Inner<T, K> {
     fn clear_expired(&mut self) {
         let timeout = self.timeout.expect("idle task requires a timeout");
         let now = self.now();
-        self.idle.retain(|_, entries| {
+        let debug_events = self.debug_events.clone();
+        self.idle.retain(|key, entries| {
             entries.retain(|entry| {
-                entry.value.is_open() && now.saturating_duration_since(entry.idle_at) <= timeout
+                let keep = entry.value.is_open()
+                    && now.saturating_duration_since(entry.idle_at) <= timeout;
+                if !keep {
+                    if let Some(events) = &debug_events {
+                        events.record(DebugEvent::PoolEvicted {
+                            origin: key.origin(),
+                        });
+                    }
+                }
+                keep
             });
             !entries.is_empty()
         });
@@ -335,6 +394,7 @@ pub(crate) struct Pooled<T: Poolable, K: Key> {
     is_reused: bool,
     key: K,
     pool: WeakOpt<Mutex<Inner<T, K>>>,
+    debug_events: Option<DebugEventLog>,
 }
 
 impl<T: Poolable, K: Key> Pooled<T, K> {
@@ -367,11 +427,22 @@ impl<T: Poolable, K: Key> Drop for Pooled<T, K> {
             return;
         };
         if !value.is_open() {
+            if let Some(events) = &self.debug_events {
+                events.record(DebugEvent::ConnectionClosed {
+                    origin: self.key.origin(),
+                });
+            }
             return;
         }
         if let Some(pool) = self.pool.upgrade() {
             if let Ok(mut inner) = pool.lock() {
-                inner.put(self.key.clone(), value, &pool);
+                if inner.put(self.key.clone(), value, &pool) {
+                    if let Some(events) = &self.debug_events {
+                        events.record(DebugEvent::ConnectionPooled {
+                            origin: self.key.origin(),
+                        });
+                    }
+                }
             }
         }
     }
@@ -432,12 +503,13 @@ impl<T: Poolable, K: Key> Checkout<T, K> {
             let mut inner = inner.lock().expect("pool mutex poisoned");
             let now = inner.now();
             let expiration = Expiration(inner.timeout);
+            let debug_events = inner.debug_events.clone();
             let maybe_entry = inner.idle.get_mut(&self.key).and_then(|entries| {
                 let entry = IdlePopper {
                     _key: &self.key,
                     list: entries,
                 }
-                .pop(expiration, now);
+                .pop(expiration, now, debug_events.as_ref());
                 entry.map(|entry| (entry, entries.is_empty()))
             });
             let (entry, remove) = maybe_entry.map_or((None, true), |(entry, empty)| (Some(entry), empty));
@@ -569,11 +641,14 @@ impl<T> WeakOpt<T> {
 #[cfg(test)]
 mod tests {
     use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
+    use std::time::Duration;
 
     use futures_lite::future::block_on;
 
-    use super::{Config, Connecting, Pool, Poolable, Protocol, Reservation, WeakOpt};
-    use crate::runtime::BoxExecutor;
+    use super::{Checkout, CheckoutError, Config, Connecting, Pool, Poolable, Protocol, Reservation, WeakOpt};
+    use crate::runtime::{AsyncIoTimer, BoxExecutor, BoxSendFuture};
 
     #[derive(Debug, PartialEq, Eq)]
     struct Unique(u8);
@@ -621,6 +696,15 @@ mod tests {
         fn execute(&self, _: F) {}
     }
 
+    #[derive(Clone)]
+    struct SmolExecutor;
+
+    impl hyper::rt::Executor<BoxSendFuture> for SmolExecutor {
+        fn execute(&self, future: BoxSendFuture) {
+            smol::spawn(future).detach();
+        }
+    }
+
     fn pool() -> Pool<Unique, String> {
         Pool::new(
             Config {
@@ -628,6 +712,7 @@ mod tests {
                 max_idle_per_host: 2,
             },
             BoxExecutor::new(Noop),
+            None,
             None,
         )
     }
@@ -637,6 +722,11 @@ mod tests {
             key,
             pool: WeakOpt::none(),
         }
+    }
+
+    fn poll_once<T: Poolable>(checkout: &mut Checkout<T, String>) -> Poll<Result<super::Pooled<T, String>, CheckoutError>> {
+        let mut cx = Context::from_waker(Waker::noop());
+        Pin::new(checkout).poll(&mut cx)
     }
 
     #[test]
@@ -658,6 +748,134 @@ mod tests {
         assert!(pool.connecting(&key, Protocol::Http2).is_some());
     }
 
+    #[test]
+    fn dropped_checkout_removes_its_waiter() {
+        let pool = pool();
+        let key = "example.test".to_owned();
+        let mut checkout = pool.checkout(key.clone());
+        assert!(poll_once(&mut checkout).is_pending());
+        assert_eq!(
+            pool.inner.as_ref().unwrap().lock().unwrap().waiters[&key].len(),
+            1
+        );
+        drop(checkout);
+        assert!(!pool.inner.as_ref().unwrap().lock().unwrap().waiters.contains_key(&key));
+    }
+
+    #[test]
+    fn cancelled_h2_establishment_wakes_waiter_and_allows_retry() {
+        let pool = pool();
+        let key = "example.test".to_owned();
+        let owner = pool.connecting(&key, Protocol::Http2).unwrap();
+        let mut checkout = pool.checkout(key.clone());
+        assert!(poll_once(&mut checkout).is_pending());
+
+        // Dropping the sole establishment owner clears the marker and drops
+        // parked senders. A later client attempt owns a fresh marker instead
+        // of inheriting a stranded waiter.
+        drop(owner);
+        assert!(matches!(
+            poll_once(&mut checkout),
+            Poll::Ready(Err(CheckoutError::NoLongerWanted))
+        ));
+        assert!(pool.connecting(&key, Protocol::Http2).is_some());
+    }
+
+    #[test]
+    fn max_idle_per_host_caps_unique_h1_connections() {
+        let pool = pool();
+        let key = "example.test".to_owned();
+        for value in [1, 2, 3] {
+            drop(pool.pooled(connecting(key.clone()), Unique(value)));
+        }
+        assert_eq!(
+            pool.inner.as_ref().unwrap().lock().unwrap().idle[&key].len(),
+            2
+        );
+    }
+
+    #[derive(Debug)]
+    struct Closed;
+
+    impl Poolable for Closed {
+        fn is_open(&self) -> bool {
+            false
+        }
+
+        fn reserve(self) -> Reservation<Self> {
+            Reservation::Unique(self)
+        }
+
+        fn can_share(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn closed_values_are_not_reinserted() {
+        let pool = Pool::<Closed, String>::new(
+            Config {
+                idle_timeout: None,
+                max_idle_per_host: 2,
+            },
+            BoxExecutor::new(Noop),
+            None,
+            None,
+        );
+        let key = "example.test".to_owned();
+        drop(pool.pooled(
+            Connecting {
+                key: key.clone(),
+                pool: WeakOpt::none(),
+            },
+            Closed,
+        ));
+        assert!(!pool.inner.as_ref().unwrap().lock().unwrap().idle.contains_key(&key));
+    }
+
+    #[test]
+    fn checkout_evicts_expired_idle_connections() {
+        let pool = Pool::<Unique, String>::new(
+            Config {
+                idle_timeout: Some(Duration::from_millis(1)),
+                max_idle_per_host: 2,
+            },
+            BoxExecutor::new(Noop),
+            None,
+            None,
+        );
+        let key = "example.test".to_owned();
+        drop(pool.pooled(connecting(key.clone()), Unique(7)));
+        std::thread::sleep(Duration::from_millis(5));
+        let mut checkout = pool.checkout(key.clone());
+        assert!(poll_once(&mut checkout).is_pending());
+        assert!(!pool.inner.as_ref().unwrap().lock().unwrap().idle.contains_key(&key));
+    }
+
+    #[test]
+    fn idle_timer_evicts_connections_without_a_later_checkout() {
+        smol::block_on(async {
+            let pool = Pool::<Unique, String>::new(
+                Config {
+                    idle_timeout: Some(Duration::from_millis(1)),
+                    max_idle_per_host: 2,
+                },
+                BoxExecutor::new(SmolExecutor),
+                Some(std::sync::Arc::new(AsyncIoTimer)),
+                None,
+            );
+            let key = "example.test".to_owned();
+            drop(pool.pooled(connecting(key.clone()), Unique(7)));
+            assert!(pool.inner.as_ref().unwrap().lock().unwrap().idle.contains_key(&key));
+
+            // The recurring task intentionally uses a conservative 90 ms
+            // minimum interval to avoid a busy timer for tiny user-supplied
+            // values. No checkout is performed after this wait.
+            async_io::Timer::after(Duration::from_millis(120)).await;
+            assert!(!pool.inner.as_ref().unwrap().lock().unwrap().idle.contains_key(&key));
+        });
+    }
+
     #[cfg(feature = "http2")]
     #[test]
     fn shared_reservation_remains_available_while_an_h2_stream_is_checked_out() {
@@ -667,6 +885,7 @@ mod tests {
                 max_idle_per_host: 2,
             },
             BoxExecutor::new(Noop),
+            None,
             None,
         );
         let key = "example.test".to_owned();

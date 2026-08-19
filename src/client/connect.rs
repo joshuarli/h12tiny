@@ -42,7 +42,9 @@ pub(crate) enum Error {
     UnexpectedAlpn(Vec<u8>),
     #[cfg(feature = "tls")]
     RequiredHttp2NotNegotiated,
-    Io(std::io::Error),
+    Connect(std::io::Error),
+    #[cfg(feature = "tls")]
+    Tls(std::io::Error),
 }
 
 impl fmt::Display for Error {
@@ -58,7 +60,9 @@ impl fmt::Display for Error {
             Self::UnexpectedAlpn(protocol) => write!(f, "server selected unsupported ALPN {protocol:?}"),
             #[cfg(feature = "tls")]
             Self::RequiredHttp2NotNegotiated => f.write_str("HTTP/2 was required but ALPN did not select h2"),
-            Self::Io(error) => error.fmt(f),
+            Self::Connect(error) => error.fmt(f),
+            #[cfg(feature = "tls")]
+            Self::Tls(error) => error.fmt(f),
         }
     }
 }
@@ -66,15 +70,26 @@ impl fmt::Display for Error {
 impl StdError for Error {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
-            Self::Io(error) => Some(error),
+            Self::Connect(error) => Some(error),
+            #[cfg(feature = "tls")]
+            Self::Tls(error) => Some(error),
             _ => None,
         }
     }
 }
 
-impl From<std::io::Error> for Error {
-    fn from(error: std::io::Error) -> Self {
-        Self::Io(error)
+impl Error {
+    pub(crate) fn client_error_kind(&self) -> super::ErrorKind {
+        match self {
+            Self::UnsupportedScheme(_) => super::ErrorKind::UnsupportedScheme,
+            #[cfg(feature = "tls")]
+            Self::UnexpectedAlpn(_) | Self::RequiredHttp2NotNegotiated => super::ErrorKind::Alpn,
+            #[cfg(feature = "tls")]
+            Self::InvalidServerName(_) | Self::Tls(_) => super::ErrorKind::Tls,
+            #[cfg(not(feature = "tls"))]
+            Self::TlsDisabled => super::ErrorKind::Tls,
+            Self::MissingHost | Self::Connect(_) => super::ErrorKind::Connect,
+        }
     }
 }
 
@@ -115,11 +130,21 @@ impl Connector {
     }
 
     pub(crate) async fn connect(&self, uri: Uri, require_h2: bool) -> Result<Connected, Error> {
-        let host = uri.host().ok_or(Error::MissingHost)?.to_owned();
+        // `http::Uri::host()` preserves RFC authority brackets around IPv6
+        // literals. DNS and Rustls `ServerName` require the bare address.
+        let host = uri
+            .host()
+            .ok_or(Error::MissingHost)?
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or_else(|| uri.host().expect("host was checked above"))
+            .to_owned();
         let scheme = uri.scheme_str().ok_or_else(|| Error::UnsupportedScheme("".to_owned()))?;
         match scheme {
             "http" => {
-                let stream = TcpStream::connect((host.as_str(), uri.port_u16().unwrap_or(80))).await?;
+                let stream = TcpStream::connect((host.as_str(), uri.port_u16().unwrap_or(80)))
+                    .await
+                    .map_err(Error::Connect)?;
                 Ok(Connected {
                     io: Box::new(FuturesIo(stream)),
                     protocol: if require_h2 { Protocol::Http2 } else { Protocol::Http1 },
@@ -137,10 +162,12 @@ impl Connector {
         port: u16,
         require_h2: bool,
     ) -> Result<Connected, Error> {
-        let stream = TcpStream::connect((host.as_str(), port)).await?;
+        let stream = TcpStream::connect((host.as_str(), port))
+            .await
+            .map_err(Error::Connect)?;
         let server_name = futures_rustls::pki_types::ServerName::try_from(host.clone())
             .map_err(|_| Error::InvalidServerName(host))?;
-        let tls = self.tls.connect(server_name, stream).await?;
+        let tls = self.tls.connect(server_name, stream).await.map_err(Error::Tls)?;
         let protocol = match tls.get_ref().1.alpn_protocol() {
             Some(b"h2") => Protocol::Http2,
             Some(b"http/1.1") | None if !require_h2 => Protocol::Http1,

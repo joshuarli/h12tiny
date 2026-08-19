@@ -15,6 +15,13 @@ use http::{Method, Request, Uri};
 /// connections across authorities, even where the RFC would permit that.
 pub(crate) type PoolKey = (Scheme, Authority);
 
+/// Formats the stable, direct-origin identity used by the pool. Keeping this
+/// beside [`PoolKey`] means diagnostics cannot accidentally report a request
+/// target after HTTP/1 normalization has removed its scheme and authority.
+pub(crate) fn pool_key_origin((scheme, authority): &PoolKey) -> String {
+    format!("{scheme}://{authority}")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Error {
     /// A direct-origin request needs an absolute URI to identify its peer.
