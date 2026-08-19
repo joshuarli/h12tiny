@@ -52,7 +52,11 @@ json = ["util", "h12tiny-util/json", "h12tiny-web?/json"]
 query = ["web", "h12tiny-web/query"]
 sse = ["web", "h12tiny-web/sse"]
 cors = ["web", "h12tiny-web/cors"]
-full = ["client", "server", "util", "web", "http1", "http2", "tls", "upgrade", "json", "query", "sse", "cors"]
+# RFC 6455 request validation, handshake response construction, and a
+# futures-lite framed upgraded connection. Raw `HttpUpgrade` remains available
+# through `upgrade` for applications that own another upgrade protocol.
+websocket = ["web", "upgrade", "h12tiny-web/websocket"]
+full = ["client", "server", "util", "web", "http1", "http2", "tls", "upgrade", "json", "query", "sse", "cors", "websocket"]
 
 # These are runnable integration tools rather than protocol-only examples.
 # Keep feature-minimal library builds useful without trying to compile their
@@ -76,7 +80,6 @@ h12tiny-web = { path = "crates/h12tiny-web", optional = true, default-features =
 async-io = { workspace = true }
 async-net = { workspace = true }
 bytes = { workspace = true }
-fastwebsockets = { path = "../fastwebsockets-futures-lite" }
 futures-channel = { workspace = true }
 futures-io = { workspace = true }
 futures-lite = { workspace = true }

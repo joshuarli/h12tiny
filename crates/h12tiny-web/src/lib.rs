@@ -1,9 +1,11 @@
 //! A small, protocol-neutral HTTP application substrate.
 //!
 //! `Router` owns application state and dispatches ordinary HTTP requests to
-//! async functions. It deliberately stops at the `http`/`http-body` layer:
-//! connection drivers and protocol-specific upgrade handling belong to
-//! `h12tiny-server`.
+//! async functions. It deliberately stops at the `http`/`http-body` layer;
+//! connection drivers and raw upgrade mechanics belong to `h12tiny-server`.
+//! The optional `websocket` feature adds only RFC 6455's standard HTTP/1.1
+//! handshake and futures-lite frame adaptation, never application message
+//! policy.
 
 use std::collections::HashMap;
 use std::error::Error as StdError;
@@ -21,12 +23,27 @@ pub use http::header::{HeaderMap, HeaderValue};
 use http::header::{ALLOW, CONTENT_TYPE};
 #[cfg(feature = "cors")]
 use http::header::{HeaderName, ORIGIN};
-pub use http::{Method, StatusCode};
+pub use http::{Method, StatusCode, Version};
 use http::{Request as HttpRequest, Response as HttpResponse};
 use http_body::{Body, Frame, SizeHint};
 use matchit::Router as MatchRouter;
 
 use h12tiny_util::{boxed_body, collect_bytes_limited, BoxBody, BoxError};
+
+#[cfg(feature = "websocket")]
+use base64::Engine as _;
+#[cfg(feature = "websocket")]
+use fastwebsockets::{after_handshake_split, FragmentCollectorRead, Role, WebSocketWrite};
+/// WebSocket frame types exposed by the optional RFC 6455 adapter.
+#[cfg(feature = "websocket")]
+pub use fastwebsockets::{
+    Frame as WebSocketFrame, OpCode as WebSocketOpCode, Payload as WebSocketPayload,
+    WebSocketError,
+};
+#[cfg(feature = "websocket")]
+use h12tiny_core::io::HyperIo;
+#[cfg(feature = "websocket")]
+use sha1::{Digest as _, Sha1};
 
 /// The request body accepted by handlers after the router erases the
 /// transport's concrete body type.
@@ -462,6 +479,31 @@ where
                 Rejection::new(StatusCode::INTERNAL_SERVER_ERROR, "request extension is missing")
             })?;
             Ok((Self(value), Request::from_parts(parts, body)))
+        })
+    }
+}
+
+/// Optionally extract a cloned value from `Request::extensions`.
+///
+/// This is useful for request-scoped context such as trace IDs: a handler can
+/// remain usable in direct tests while a production service wrapper injects
+/// the extension at the transport boundary.
+impl<S, T> FromRequest<S> for Option<Extension<T>>
+where
+    T: Clone + Send + Sync + 'static,
+    S: Send + Sync + 'static,
+{
+    type Rejection = Rejection;
+
+    fn from_request(
+        request: Request,
+        _state: &Option<S>,
+        _meta: &RequestMeta,
+    ) -> Pin<Box<dyn Future<Output = Result<(Self, Request), Self::Rejection>> + Send>> {
+        Box::pin(async move {
+            let (parts, body) = split_request(request);
+            let value = parts.extensions.get::<T>().cloned().map(Extension);
+            Ok((value, Request::from_parts(parts, body)))
         })
     }
 }
@@ -1014,6 +1056,38 @@ impl<S> Router<S> {
         self
     }
 
+    /// Set an application-handler deadline for every currently configured
+    /// route. Routes added after this call retain their own timeout setting.
+    ///
+    /// This mirrors applying a timeout at a router boundary while keeping the
+    /// deadline explicit in the route tree. Streaming routes should be built
+    /// outside this subtree (or call [`Router::without_timeout`]).
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        for (_, entry) in &mut self.routes {
+            entry.methods = entry.methods.clone().timeout(timeout);
+        }
+        self
+    }
+
+    /// Remove handler deadlines from every currently configured route.
+    pub fn without_timeout(mut self) -> Self {
+        for (_, entry) in &mut self.routes {
+            entry.methods = entry.methods.clone().without_timeout();
+        }
+        self
+    }
+
+    /// Limit request bytes for every currently configured route.
+    ///
+    /// Use [`MethodRouter::body_limit`] when only one method on a route needs
+    /// the limit.
+    pub fn body_limit(mut self, limit: usize) -> Self {
+        for (_, entry) in &mut self.routes {
+            entry.methods = entry.methods.clone().body_limit(limit);
+        }
+        self
+    }
+
     /// Add a fallback handler used when no path matches or a path has no
     /// handler for the request method.
     pub fn fallback<T, F>(mut self, handler: F) -> Self
@@ -1036,7 +1110,16 @@ impl<S> Router<S> {
     /// Prefix every route in `nested` and add it to this router.
     pub fn nest(mut self, prefix: &str, nested: Router<S>) -> Self {
         for (path, entry) in nested.routes {
+            let nested_root = path == "/";
             let path = join_paths(prefix, &path);
+            // A nested root represents the collection resource itself. APIs
+            // commonly document that resource without a trailing slash (for
+            // example `/api/v1/machines`), while callers that retain a slash
+            // should remain compatible too. Register both spellings here so
+            // a router never silently exposes only its non-root children.
+            if nested_root && path != "/" {
+                self = self.route(&format!("{path}/"), entry.methods.clone());
+            }
             self = self.route(&path, entry.methods);
         }
         if self.fallback.is_none() {
@@ -1158,6 +1241,80 @@ where
     }
 }
 
+/// An application-owned dispatch wrapper around a [`Router`].
+///
+/// The router deliberately does not define a middleware framework. This small
+/// adapter instead gives an application one explicit request boundary for
+/// request-local context and response accounting while retaining the same
+/// direct Hyper service implementation as [`Router`].
+pub struct RouterService<S, F> {
+    router: Router<S>,
+    dispatch: F,
+}
+
+impl<S, F> Clone for RouterService<S, F>
+where
+    Router<S>: Clone,
+    F: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            router: self.router.clone(),
+            dispatch: self.dispatch.clone(),
+        }
+    }
+}
+
+impl<S, F> RouterService<S, F>
+where
+    S: Clone + Send + Sync + 'static,
+    F: Fn(Request, Router<S>) -> HandlerFuture + Clone + Send + Sync + 'static,
+{
+    /// Dispatch a request that already has the router's erased body type.
+    ///
+    /// This keeps in-memory application tests on the same explicit transport
+    /// boundary as a real Hyper connection.
+    pub fn call_boxed(&self, request: Request) -> HandlerFuture {
+        (self.dispatch)(request, self.router.clone())
+    }
+}
+
+impl<S> Router<S> {
+    /// Wrap this router in one application-defined transport boundary.
+    ///
+    /// `dispatch` receives a boxed request and a clone of the router. It is
+    /// responsible for calling [`Router::call_boxed`] exactly once when it
+    /// wishes to route the request. This supports request extensions, tracing,
+    /// and metrics without coupling the web crate to a Tower-style stack.
+    pub fn service_with<F>(self, dispatch: F) -> RouterService<S, F>
+    where
+        F: Clone + Send + Sync + 'static,
+    {
+        RouterService {
+            router: self,
+            dispatch,
+        }
+    }
+}
+
+impl<S, F, B> hyper::service::Service<HttpRequest<B>> for RouterService<S, F>
+where
+    S: Clone + Send + Sync + 'static,
+    F: Fn(Request, Router<S>) -> HandlerFuture + Clone + Send + Sync + 'static,
+    B: Body<Data = Bytes> + Send + Sync + 'static,
+    B::Error: Into<BoxError>,
+{
+    type Response = Response;
+    type Error = std::convert::Infallible;
+    type Future = ServiceFuture;
+
+    fn call(&self, request: HttpRequest<B>) -> Self::Future {
+        let request = request.map(boxed_body);
+        let response = self.call_boxed(request);
+        Box::pin(async move { Ok(response.await) })
+    }
+}
+
 fn join_paths(prefix: &str, path: &str) -> String {
     if prefix == "/" {
         return path.to_owned();
@@ -1165,7 +1322,7 @@ fn join_paths(prefix: &str, path: &str) -> String {
     let prefix = prefix.trim_end_matches('/');
     let path = path.trim_start_matches('/');
     if path.is_empty() {
-        format!("{prefix}/")
+        prefix.to_owned()
     } else {
         format!("{prefix}/{path}")
     }
@@ -1707,6 +1864,236 @@ where
     }
 }
 
+/// The reader half of an accepted server-role WebSocket connection.
+///
+/// This is a [`FragmentCollectorRead`] so applications receive complete text
+/// and binary messages and validated UTF-8 text. Control-frame replies remain
+/// explicit through the callback passed to `read_frame`.
+#[cfg(feature = "websocket")]
+pub type WebSocketReader = FragmentCollectorRead<
+    futures_lite::io::ReadHalf<HyperIo<h12tiny_server::upgrade::Upgraded>>,
+>;
+
+/// The writer half of an accepted server-role WebSocket connection.
+#[cfg(feature = "websocket")]
+pub type WebSocketWriter =
+    WebSocketWrite<futures_lite::io::WriteHalf<HyperIo<h12tiny_server::upgrade::Upgraded>>>;
+
+/// A framed, server-role RFC 6455 connection obtained from a successful HTTP
+/// upgrade.
+///
+/// h12tiny owns only HTTP validation, the switching response, and I/O/frame
+/// adaptation. Application protocol semantics—including subprotocols,
+/// authentication, message handling, backpressure, and task ownership—remain
+/// with the caller.
+#[cfg(feature = "websocket")]
+pub struct WebSocketConnection {
+    reader: WebSocketReader,
+    writer: WebSocketWriter,
+}
+
+#[cfg(feature = "websocket")]
+impl WebSocketConnection {
+    /// Split the connection into independently owned reader and writer halves.
+    pub fn split(self) -> (WebSocketReader, WebSocketWriter) {
+        (self.reader, self.writer)
+    }
+}
+
+/// A malformed or unsupported RFC 6455 HTTP upgrade request.
+#[cfg(feature = "websocket")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WebSocketUpgradeError {
+    /// RFC 6455's HTTP upgrade handshake begins with an HTTP `GET` request.
+    Method,
+    /// RFC 6455's HTTP upgrade handshake is only valid over HTTP/1.1 here.
+    HttpVersion,
+    /// HTTP/1.1's mandatory `Host` header is absent or malformed.
+    Host,
+    /// `Connection` does not include the `Upgrade` token.
+    Connection,
+    /// `Upgrade` does not include the `websocket` token.
+    Upgrade,
+    /// `Sec-WebSocket-Version` is absent or is not version 13.
+    Version,
+    /// `Sec-WebSocket-Key` is absent.
+    MissingKey,
+    /// `Sec-WebSocket-Key` is not base64 for exactly 16 bytes.
+    InvalidKey,
+}
+
+#[cfg(feature = "websocket")]
+impl fmt::Display for WebSocketUpgradeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Method => "WebSocket upgrades require GET",
+            Self::HttpVersion => "WebSocket upgrades require HTTP/1.1",
+            Self::Host => "WebSocket upgrades require Host",
+            Self::Connection => "WebSocket upgrades require Connection: Upgrade",
+            Self::Upgrade => "WebSocket upgrades require Upgrade: websocket",
+            Self::Version => "WebSocket upgrades require Sec-WebSocket-Version: 13",
+            Self::MissingKey => "WebSocket upgrades require Sec-WebSocket-Key",
+            Self::InvalidKey => "Sec-WebSocket-Key must decode to exactly 16 bytes",
+        })
+    }
+}
+
+#[cfg(feature = "websocket")]
+impl StdError for WebSocketUpgradeError {}
+
+/// A validated RFC 6455 WebSocket request whose upgraded connection can be
+/// awaited after its switching response has been returned.
+///
+/// [`HttpUpgrade`] remains the smaller raw escape hatch for any other upgrade
+/// protocol. Use this type only when h12tiny should own the standard WebSocket
+/// handshake and server-role frame adaptation.
+#[cfg(feature = "websocket")]
+pub struct WebSocketUpgrade {
+    accept: String,
+    on_upgrade: h12tiny_server::upgrade::OnUpgrade,
+}
+
+#[cfg(feature = "websocket")]
+impl WebSocketUpgrade {
+    /// Validate and capture the upgrade from an erased router request.
+    ///
+    /// This constructor lets an application map malformed-handshake errors to
+    /// its own error response. The [`FromRequest`] implementation below maps
+    /// the same errors to h12tiny's standard 400 rejection.
+    pub fn try_from_request(request: &mut Request) -> Result<Self, WebSocketUpgradeError> {
+        let key = validate_websocket_request(request)?;
+        let on_upgrade = h12tiny_server::upgrade::on(request);
+        Ok(Self {
+            accept: websocket_accept(&key),
+            on_upgrade,
+        })
+    }
+
+    /// Build the RFC 6455 `101 Switching Protocols` response.
+    ///
+    /// Call this before moving the upgrade into a task that awaits
+    /// [`Self::into_connection`]; Hyper resolves the raw upgrade only after
+    /// this response has been accepted by the connection driver.
+    pub fn response(&self) -> Response {
+        Response::builder()
+            .status(StatusCode::SWITCHING_PROTOCOLS)
+            .header("connection", "Upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-accept", &self.accept)
+            .body(boxed_body(h12tiny_util::empty_body()))
+            .expect("RFC 6455's static response headers are valid")
+    }
+
+    /// Await the HTTP protocol switch and adapt the stream to complete-message
+    /// WebSocket reads plus server-role frame writes.
+    pub async fn into_connection(self) -> Result<WebSocketConnection, hyper::Error> {
+        let upgraded = self.on_upgrade.await?;
+        let (read, write) = futures_lite::io::split(HyperIo::new(upgraded));
+        let (reader, writer) = after_handshake_split(read, write, Role::Server);
+        Ok(WebSocketConnection {
+            reader: FragmentCollectorRead::new(reader),
+            writer,
+        })
+    }
+}
+
+#[cfg(feature = "websocket")]
+impl<S> FromRequest<S> for WebSocketUpgrade
+where
+    S: Send + Sync + 'static,
+{
+    type Rejection = Rejection;
+
+    fn from_request(
+        mut request: Request,
+        _state: &Option<S>,
+        _meta: &RequestMeta,
+    ) -> Pin<Box<dyn Future<Output = Result<(Self, Request), Self::Rejection>> + Send>> {
+        Box::pin(async move {
+            let upgrade = Self::try_from_request(&mut request)
+                .map_err(|error| Rejection::new(StatusCode::BAD_REQUEST, error.to_string()))?;
+            Ok((upgrade, request))
+        })
+    }
+}
+
+#[cfg(feature = "websocket")]
+fn validate_websocket_request(request: &Request) -> Result<String, WebSocketUpgradeError> {
+    if request.method() != Method::GET {
+        return Err(WebSocketUpgradeError::Method);
+    }
+    if request.version() != Version::HTTP_11 {
+        return Err(WebSocketUpgradeError::HttpVersion);
+    }
+    if request
+        .headers()
+        .get_all("host")
+        .iter()
+        .count()
+        != 1
+        || request
+            .headers()
+            .get("host")
+            .and_then(|value| value.to_str().ok())
+            .is_none_or(|value| value.trim().is_empty())
+    {
+        return Err(WebSocketUpgradeError::Host);
+    }
+    if !header_has_token(request, "connection", "upgrade") {
+        return Err(WebSocketUpgradeError::Connection);
+    }
+    if !header_has_token(request, "upgrade", "websocket") {
+        return Err(WebSocketUpgradeError::Upgrade);
+    }
+    let versions = request.headers().get_all("sec-websocket-version");
+    if versions.iter().count() != 1
+        || versions
+            .iter()
+            .next()
+            .and_then(|value| value.to_str().ok())
+            .is_none_or(|value| value.trim() != "13")
+    {
+        return Err(WebSocketUpgradeError::Version);
+    }
+
+    let mut keys = request
+        .headers()
+        .get_all("sec-websocket-key")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(str::trim);
+    let Some(key) = keys.next() else {
+        return Err(WebSocketUpgradeError::MissingKey);
+    };
+    if keys.next().is_some()
+        || !base64::engine::general_purpose::STANDARD
+            .decode(key)
+            .is_ok_and(|decoded| decoded.len() == 16)
+    {
+        return Err(WebSocketUpgradeError::InvalidKey);
+    }
+    Ok(key.to_owned())
+}
+
+#[cfg(feature = "websocket")]
+fn header_has_token(request: &Request, header: &str, expected: &str) -> bool {
+    request
+        .headers()
+        .get_all(header)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|token| token.trim().eq_ignore_ascii_case(expected))
+}
+
+#[cfg(feature = "websocket")]
+fn websocket_accept(key: &str) -> String {
+    let mut digest = Sha1::new();
+    digest.update(key.as_bytes());
+    digest.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    base64::engine::general_purpose::STANDARD.encode(digest.finalize())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1754,10 +2141,16 @@ mod tests {
 
     #[test]
     fn nest_merge_fallback_and_timeout_work() {
-        let nested = Router::new().route("/health", get(|| async { "ok" }));
+        let nested = Router::new()
+            .route("/", get(|| async { "root" }))
+            .route("/health", get(|| async { "ok" }));
         let router = Router::new().nest("/api", nested).fallback(|| async {
             (StatusCode::NOT_FOUND, "fallback")
         });
+        let response = block_on(router.call(Request::get("/api").body(h12tiny_util::empty_body()).unwrap()));
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = block_on(router.call(Request::get("/api/").body(h12tiny_util::empty_body()).unwrap()));
+        assert_eq!(response.status(), StatusCode::OK);
         let response = block_on(router.call(Request::get("/api/health").body(h12tiny_util::empty_body()).unwrap()));
         assert_eq!(response.status(), StatusCode::OK);
         let response = block_on(router.call(Request::get("/missing").body(h12tiny_util::empty_body()).unwrap()));
@@ -1773,6 +2166,83 @@ mod tests {
         );
         let response = block_on(router.call(Request::get("/slow").body(h12tiny_util::empty_body()).unwrap()));
         assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    }
+
+    #[cfg(feature = "websocket")]
+    fn websocket_request(key: &str) -> Request {
+        Request::builder()
+            .version(Version::HTTP_11)
+            .header("host", "localhost")
+            .header("connection", "keep-alive, Upgrade")
+            .header("upgrade", "WebSocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", key)
+            .body(boxed_body(h12tiny_util::empty_body()))
+            .expect("the fixed WebSocket request is valid HTTP")
+    }
+
+    #[cfg(feature = "websocket")]
+    #[test]
+    fn websocket_upgrade_validates_rfc_sample_and_builds_switching_response() {
+        let mut request = websocket_request("dGhlIHNhbXBsZSBub25jZQ==");
+        let upgrade = WebSocketUpgrade::try_from_request(&mut request)
+            .expect("the RFC 6455 sample request must validate");
+        let response = upgrade.response();
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        assert_eq!(response.headers()["connection"], "Upgrade");
+        assert_eq!(response.headers()["upgrade"], "websocket");
+        assert_eq!(
+            response.headers()["sec-websocket-accept"],
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        );
+    }
+
+    #[cfg(feature = "websocket")]
+    #[test]
+    fn websocket_upgrade_rejects_invalid_and_ambiguous_keys() {
+        let mut invalid = websocket_request("aW52YWxpZA==");
+        assert_eq!(
+            WebSocketUpgrade::try_from_request(&mut invalid).err(),
+            Some(WebSocketUpgradeError::InvalidKey)
+        );
+
+        let mut repeated = websocket_request("dGhlIHNhbXBsZSBub25jZQ==");
+        repeated.headers_mut().append(
+            "sec-websocket-key",
+            HeaderValue::from_static("dGhlIHNhbXBsZSBub25jZQ=="),
+        );
+        assert_eq!(
+            WebSocketUpgrade::try_from_request(&mut repeated).err(),
+            Some(WebSocketUpgradeError::InvalidKey)
+        );
+    }
+
+    #[cfg(feature = "websocket")]
+    #[test]
+    fn websocket_upgrade_requires_get_host_and_one_version_header() {
+        let mut wrong_method = websocket_request("dGhlIHNhbXBsZSBub25jZQ==");
+        *wrong_method.method_mut() = Method::POST;
+        assert_eq!(
+            WebSocketUpgrade::try_from_request(&mut wrong_method).err(),
+            Some(WebSocketUpgradeError::Method)
+        );
+
+        let mut missing_host = websocket_request("dGhlIHNhbXBsZSBub25jZQ==");
+        missing_host.headers_mut().remove("host");
+        assert_eq!(
+            WebSocketUpgrade::try_from_request(&mut missing_host).err(),
+            Some(WebSocketUpgradeError::Host)
+        );
+
+        let mut repeated_version = websocket_request("dGhlIHNhbXBsZSBub25jZQ==");
+        repeated_version.headers_mut().append(
+            "sec-websocket-version",
+            HeaderValue::from_static("13"),
+        );
+        assert_eq!(
+            WebSocketUpgrade::try_from_request(&mut repeated_version).err(),
+            Some(WebSocketUpgradeError::Version)
+        );
     }
 
     #[cfg(feature = "json")]

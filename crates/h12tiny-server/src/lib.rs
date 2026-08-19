@@ -18,3 +18,10 @@ pub mod lifecycle;
 pub use lifecycle::{serve, ConnectionError, Listener};
 #[cfg(feature = "tls")]
 pub use lifecycle::{serve_tls, TlsServe};
+/// TLS acceptor used by [`serve_tls`].
+///
+/// Reexporting this boundary keeps applications on h12tiny's selected
+/// futures-rustls version instead of requiring a second direct dependency just
+/// to adapt an already-configured `rustls::ServerConfig`.
+#[cfg(feature = "tls")]
+pub use futures_rustls::TlsAcceptor;

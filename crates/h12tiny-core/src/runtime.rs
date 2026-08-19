@@ -9,6 +9,33 @@ use std::time::{Duration, Instant};
 /// The erased future accepted by [`BoxExecutor`].
 pub type BoxSendFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
+/// An executor adapter backed by a cloneable submission function.
+///
+/// Applications with their own runtime can use this to hand Hyper connection
+/// work to that runtime without depending on Hyper's concrete executor trait
+/// at their application boundary. The closure must arrange for the future to
+/// be driven; dropping it would leak connection work.
+#[derive(Clone)]
+pub struct FnExecutor<F> {
+    submit: F,
+}
+
+impl<F> FnExecutor<F> {
+    /// Creates an executor that delegates every submitted future to `submit`.
+    pub fn new(submit: F) -> Self {
+        Self { submit }
+    }
+}
+
+impl<F> hyper::rt::Executor<BoxSendFuture> for FnExecutor<F>
+where
+    F: Fn(BoxSendFuture) + Send + Sync + Clone + 'static,
+{
+    fn execute(&self, future: BoxSendFuture) {
+        (self.submit)(future);
+    }
+}
+
 /// A cloneable executor handle for Hyper background tasks.
 ///
 /// This is the small type-erased boundary used by client and server builders:

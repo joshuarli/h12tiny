@@ -71,11 +71,12 @@ an H1-only client does not acquire JSON, routing, server, TLS, or H2 code.
 
 ## Intentional scope
 
-The stack does not include Tokio, native TLS, Reqwest, Axum, Tower, proxy or
-redirect policy, WebSocket framing, OpenAPI generation, HTTP/3, or an
-application tracing framework. Raw H1 upgrade is provided as a composition
-point for an application-selected framing crate; HTTP/2 extended CONNECT is
-not implemented.
+The default stack does not include Tokio, native TLS, Reqwest, Axum, Tower,
+proxy or redirect policy, OpenAPI generation, HTTP/3, or an application
+tracing framework. The optional `websocket` feature adds RFC 6455 HTTP/1.1
+validation, `101` response construction, and futures-lite server-role framing;
+message policy remains application-owned. Raw H1 upgrade remains available for
+other protocols, and HTTP/2 extended CONNECT is not implemented.
 
 Run the enforced feature/dependency matrix with:
 

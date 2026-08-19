@@ -33,6 +33,9 @@ The workspace split, h12tiny-util, h12tiny-web, raw H1 upgrade wiring, listener 
 
 - HTTP/1.1 Upgrade: h2c remains out of scope; cleartext H2 uses prior knowledge.
 - There is no proxy, redirect, cookie, URL-resolution, native-TLS, Tokio, Tower, Reqwest, or Axum integration layer.
-- Raw HTTP/1 upgrade is available, but WebSocket framing and HTTP/2 extended CONNECT are application-selected/out of scope. The dev-only fastwebsockets-futures-lite interoperability test proves the composition boundary without making that crate a production dependency.
+- Raw HTTP/1 upgrade remains available for application-selected protocols.
+  The optional `websocket` feature adds RFC 6455 HTTP/1.1 validation, the
+  switching response, and futures-lite server-role framing; its message policy
+  remains application-owned. HTTP/2 extended CONNECT remains out of scope.
 
 See REPORT.md for the complete workspace, feature, dependency, size, test, and smolvm-migration evidence.

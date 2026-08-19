@@ -13,11 +13,19 @@ query = ["dep:serde", "dep:serde_urlencoded"]
 sse = []
 cors = []
 upgrade = ["dep:h12tiny-server", "h12tiny-server/upgrade"]
+# Optional RFC 6455 boundary. This feature validates the HTTP/1.1 upgrade,
+# builds the 101 response, and adapts the resulting stream to the local
+# futures-lite frame parser; application message policy remains outside h12tiny.
+websocket = ["upgrade", "dep:base64", "dep:fastwebsockets", "dep:futures-lite", "dep:h12tiny-core", "dep:sha1"]
 
 [dependencies]
 async-io = { workspace = true }
+base64 = { version = "0.22", optional = true }
 bytes = { workspace = true }
+fastwebsockets = { path = "../../../fastwebsockets-futures-lite", optional = true }
+futures-lite = { workspace = true, optional = true }
 futures-util = { workspace = true }
+h12tiny-core = { path = "../h12tiny-core", default-features = false, optional = true }
 h12tiny-server = { path = "../h12tiny-server", default-features = false, optional = true }
 h12tiny-util = { path = "../h12tiny-util", default-features = false }
 http = { workspace = true }
@@ -28,6 +36,7 @@ matchit = "0.8"
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 serde_urlencoded = { version = "0.7", optional = true }
+sha1 = { version = "0.10", optional = true }
 
 [dev-dependencies]
 futures-lite = { workspace = true }

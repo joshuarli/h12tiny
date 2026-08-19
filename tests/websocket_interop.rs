@@ -2,18 +2,18 @@
     feature = "server",
     feature = "web",
     feature = "upgrade",
+    feature = "websocket",
     feature = "http1"
 ))]
 
 use async_net::{TcpListener, TcpStream};
-use fastwebsockets::{after_handshake_split, Frame, OpCode, Role};
 use futures_lite::io::{AsyncReadExt as LiteAsyncReadExt, AsyncWriteExt as LiteAsyncWriteExt};
-use h12tiny::io::{FuturesIo, HyperIo};
+use h12tiny::io::FuturesIo;
 use h12tiny::runtime::{BoxExecutor, BoxSendFuture};
 use h12tiny::server::conn::auto;
 use h12tiny::util;
-use h12tiny::web::{get, HttpUpgrade, Router};
-use http::{Response, StatusCode};
+use h12tiny::web::{get, Router, WebSocketFrame, WebSocketOpCode, WebSocketUpgrade};
+use http::Response;
 
 #[derive(Clone, Copy, Debug)]
 struct TestExecutor;
@@ -24,40 +24,34 @@ impl hyper::rt::Executor<BoxSendFuture> for TestExecutor {
     }
 }
 
-fn websocket_echo(upgrade: HttpUpgrade) -> Response<util::BoxBody> {
+fn websocket_echo(upgrade: WebSocketUpgrade) -> Response<util::BoxBody> {
+    let response = upgrade.response();
     std::thread::spawn(move || {
         futures_lite::future::block_on(async move {
-            let upgraded = upgrade
-                .on_upgrade
+            let connection = upgrade
+                .into_connection()
                 .await
                 .expect("the H1 upgrade must resolve for the websocket route");
-            let (read, write) = futures_util::io::AsyncReadExt::split(HyperIo::new(upgraded));
-            let (mut reader, mut writer) = after_handshake_split(read, write, Role::Server);
-            reader.set_auto_close(false);
-            reader.set_auto_pong(false);
+            let (mut reader, mut writer) = connection.split();
             let frame = reader
                 .read_frame(&mut |_| async { Ok::<(), std::io::Error>(()) })
                 .await
                 .expect("the sibling websocket parser must read the client frame");
-            assert_eq!(frame.opcode, OpCode::Text);
+            assert_eq!(frame.opcode, WebSocketOpCode::Text);
             assert_eq!(&*frame.payload, b"hello");
             writer
-                .write_frame(Frame::new(frame.fin, frame.opcode, None, frame.payload))
+                .write_frame(WebSocketFrame::new(
+                    frame.fin,
+                    frame.opcode,
+                    None,
+                    frame.payload,
+                ))
                 .await
                 .expect("the sibling websocket parser must write the echo frame");
         });
     });
 
-    Response::builder()
-        .status(StatusCode::SWITCHING_PROTOCOLS)
-        .header("Connection", "Upgrade")
-        .header("Upgrade", "websocket")
-        // RFC 6455's documented sample-key result. The fixture client below
-        // uses this fixed key so the h12tiny route owns only HTTP upgrade
-        // mechanics while the application owns WebSocket validation/framing.
-        .header("Sec-WebSocket-Accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
-        .body(util::boxed_body(util::empty_body()))
-        .unwrap()
+    response
 }
 
 async fn read_response_headers(stream: &mut TcpStream) -> Vec<u8> {
@@ -81,7 +75,7 @@ fn web_route_composes_with_the_futures_lite_websocket_parser() {
                 let (stream, _) = listener.accept().await.unwrap();
                 let router = Router::<()>::new().route(
                     "/ws",
-                    get(|upgrade: HttpUpgrade| async move { websocket_echo(upgrade) }),
+                    get(|upgrade: WebSocketUpgrade| async move { websocket_echo(upgrade) }),
                 );
                 auto::Builder::new(BoxExecutor::new(TestExecutor))
                     .http1_only()
