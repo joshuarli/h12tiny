@@ -157,15 +157,14 @@ fn closed_h2_session_is_evicted_and_the_next_request_reconnects() {
                 }
                 future::Either::Right(((), connection)) => connection,
             };
-            // Send GOAWAY while retaining the driver long enough to put it on
-            // the wire. The client must stop using its shared sender and make
-            // the second request on a replacement session.
+            // Wait for the graceful driver to finish after GOAWAY. Signaling
+            // the client immediately after `graceful_shutdown()` left a race:
+            // a new stream could be accepted before the peer had observed the
+            // GOAWAY. Completion is the deterministic boundary at which this
+            // test can require a replacement session.
             first_connection.as_mut().graceful_shutdown();
+            first_connection.await.unwrap();
             let _ = first_closed_tx.send(());
-            smol::spawn(async move {
-                let _ = first_connection.await;
-            })
-            .detach();
 
             let (second, _) = listener.accept().await.unwrap();
             server_counters.tcp_opened();
@@ -204,13 +203,22 @@ fn closed_h2_session_is_evicted_and_the_next_request_reconnects() {
                     .body(FullBody::empty())
                     .unwrap(),
             )
-            .await
-            .unwrap_err();
-        // A GOAWAY does not prove whether this stream reached the peer, so
-        // the client must surface it instead of blindly replaying the
-        // request. It must, however, evict that dead shared session so later
-        // work reconnects.
-        assert_eq!(goaway.kind(), ErrorKind::SendRequest);
+            .await;
+        // Once the first session's GOAWAY has completed, Hyper can either
+        // reject this request on the stale sender or make it directly on the
+        // replacement session. Both outcomes are safe: it must not replay a
+        // stream whose first serialization might have reached the peer, and
+        // the successful case below is a fresh second-session dispatch.
+        let goaway_succeeded = match goaway {
+            Ok(response) => {
+                assert_eq!(collect(response.into_body()).await, b"fast");
+                true
+            }
+            Err(error) => {
+                assert_eq!(error.kind(), ErrorKind::SendRequest);
+                false
+            }
+        };
         let replacement = client
             .request(
                 Request::builder()
@@ -230,7 +238,7 @@ fn closed_h2_session_is_evicted_and_the_next_request_reconnects() {
                 tls_handshakes: 0,
                 h1_connections: 0,
                 h2_sessions: 2,
-                logical_requests: 2,
+                logical_requests: if goaway_succeeded { 3 } else { 2 },
             }
         );
     });

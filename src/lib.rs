@@ -1,19 +1,40 @@
-//! A small, runtime-neutral HTTP endpoint layer built on Hyper and h2.
+//! Explicit, minimal facade for the `h12tiny-*` component crates.
 //!
-//! The crate's public modules follow the ownership boundary in `plan.md`:
-//! protocol machinery remains in Hyper/h2, while this crate owns endpoint
-//! policy, transport, pooling, and futures-I/O adaptation.
+//! Select the smallest component crate directly for the strictest dependency
+//! graph, or use this package's forwarding features for a concise dependency.
+//! The facade intentionally owns no endpoint implementation.
 
-/// Adapts futures I/O streams to Hyper's runtime-neutral I/O traits.
-pub mod io;
+#[cfg(feature = "core")]
+/// Runtime-neutral I/O adapters reexported from [`h12tiny_core`].
+pub mod io {
+    pub use h12tiny_core::io::*;
+}
 
-/// Runtime-neutral executor and timer integration.
-pub mod runtime;
+#[cfg(feature = "core")]
+/// Runtime-neutral executor and timer adapters reexported from
+/// [`h12tiny_core`].
+pub mod runtime {
+    pub use h12tiny_core::runtime::*;
+}
 
 #[cfg(feature = "client")]
-/// Client endpoint and per-origin pooling.
-pub mod client;
+/// Direct-origin client and per-origin pooling reexported from
+/// [`h12tiny_client`].
+pub mod client {
+    pub use h12tiny_client::*;
+}
 
 #[cfg(feature = "server")]
-/// Server endpoint protocol selection.
-pub mod server;
+/// Server connection and lifecycle primitives reexported from
+/// [`h12tiny_server`].
+pub mod server {
+    pub use h12tiny_server::*;
+}
+
+#[cfg(feature = "util")]
+/// Protocol-neutral body conveniences reexported from [`h12tiny_util`].
+pub use h12tiny_util as util;
+
+#[cfg(feature = "web")]
+/// Optional application adapter reexported from [`h12tiny_web`].
+pub use h12tiny_web as web;

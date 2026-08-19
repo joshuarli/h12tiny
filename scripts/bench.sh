@@ -2,7 +2,7 @@
 # Manual performance harness for deterministic endpoints from
 # examples/interop-server.rs. Run correctness checks first:
 #
-#   cargo test --all-features
+#   cargo test -p h12tiny --all-features
 #   H12TINY_HTTP1_URL=http://127.0.0.1:3000/64k \
 #   H12TINY_HTTP2_URL=http://127.0.0.1:3000/64k \
 #   scripts/bench.sh

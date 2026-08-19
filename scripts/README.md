@@ -4,7 +4,7 @@ The examples are deliberately small and use only this repository's existing
 dependencies. Start the deterministic endpoint server in one terminal:
 
 ```sh
-cargo run --release --example interop-server
+cargo run --release --features server,http1,http2,tls --example interop-server
 ```
 
 It listens on `http://127.0.0.1:3000` and
@@ -58,7 +58,23 @@ Run the normal-graph policy check with:
 sh scripts/check-normal-dependencies.sh
 ```
 
-The check rejects the forbidden production packages listed in `plan.md` from
-the enabled normal graph. `libc` is intentionally allowed, whether it is direct
-or transitive, because platform support may require it. Dev and optional
-dependencies are not inspected.
+With no arguments the check audits the facade's `full` normal graph; pass a
+different Cargo feature selection to inspect a narrower build. It rejects the
+forbidden transport/framework packages from the enabled graph. `libc` is
+intentionally allowed, whether it is direct or transitive, because platform
+support may require it. Serde is permitted only as an explicit util/web
+convenience feature and is separately excluded from the minimal component
+graphs by `check-features.sh`. Dev dependencies are not inspected.
+
+## Component feature isolation
+
+The facade defaults to no roles or protocols. Run the complete component and
+facade feature/dependency contract with:
+
+```sh
+scripts/check-features.sh
+```
+
+This verifies direct H1/H2 client and server configurations, the facade
+forwarding combinations, and required graph absences such as H2 in an H1-only
+client or JSON in `h12tiny-util` without its `json` feature.

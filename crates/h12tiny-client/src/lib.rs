@@ -1,3 +1,5 @@
+#![cfg(any(feature = "http1", feature = "http2"))]
+
 //! Direct-origin HTTP client with legacy Hyper-util pooling semantics.
 //!
 //! The public client accepts absolute `http` and `https` URIs. It owns origin
@@ -20,12 +22,11 @@ use futures_util::future::{self, Either};
 use http::{Method, Request, Response, Version};
 use hyper::body::{Body, Incoming};
 
-use self::connect::{Connected, Protocol as ConnectedProtocol};
 use self::normalize::PoolKey;
 use self::pool::{CheckoutError, Poolable, Protocol as PoolProtocol, Reservation};
-use crate::runtime::{AsyncIoTimer, BoxExecutor, BoxSendFuture};
+use h12tiny_core::runtime::{AsyncIoTimer, BoxExecutor, BoxSendFuture};
 
-pub use connect::Connector;
+pub use connect::{Connected, ConnectionIo, Connector, ConnectorBuilder, DialError, DialFuture, Dialer};
 
 /// Errors are deliberately classified by the endpoint layer rather than
 /// exposing connector/protocol implementation types in the public contract.
@@ -103,15 +104,6 @@ impl StdError for Error {
 pub enum ConnectionProtocol {
     Http1,
     Http2,
-}
-
-impl From<ConnectedProtocol> for ConnectionProtocol {
-    fn from(protocol: ConnectedProtocol) -> Self {
-        match protocol {
-            ConnectedProtocol::Http1 => Self::Http1,
-            ConnectedProtocol::Http2 => Self::Http2,
-        }
-    }
 }
 
 /// A discrete endpoint-lifecycle observation recorded by [`DebugEventLog`].
@@ -406,7 +398,7 @@ where
         };
 
         if let Some(events) = &self.debug_events {
-            let protocol = ConnectionProtocol::from(connected.protocol);
+            let protocol = connected.protocol;
             events.record(DebugEvent::ConnectionEstablished {
                 origin: origin.clone(),
                 protocol,
@@ -416,7 +408,7 @@ where
             }
         }
 
-        if connected.protocol == ConnectedProtocol::Http2 && self.config.protocol != PoolProtocol::Http2 {
+        if connected.protocol == ConnectionProtocol::Http2 && self.config.protocol != PoolProtocol::Http2 {
             connecting = connecting
                 .alpn_h2(&self.pool)
                 .ok_or_else(|| Error::new(ErrorKind::Canceled))?;
@@ -428,7 +420,7 @@ where
 
     async fn handshake(&self, connected: Connected) -> Result<PoolClient<B>, Error> {
         match connected.protocol {
-            ConnectedProtocol::Http1 => {
+            ConnectionProtocol::Http1 => {
                 #[cfg(feature = "http1")]
                 {
                     let (mut sender, driver) = self
@@ -453,7 +445,7 @@ where
                     Err(Error::new(ErrorKind::ProtocolUnavailable))
                 }
             }
-            ConnectedProtocol::Http2 => {
+            ConnectionProtocol::Http2 => {
                 #[cfg(feature = "http2")]
                 {
                     let (mut sender, driver) = self

@@ -7,9 +7,8 @@
 //! selected Hyper connection.
 //!
 //! Upstream provenance: <https://github.com/hyperium/hyper-util>, tag
-//! `v0.1.20`, `src/server/conn/auto/mod.rs`.  The upgrade API is intentionally
-//! omitted: this POC supports HTTP/2 prior knowledge, not HTTP/1.1 `h2c`
-//! upgrades.
+//! `v0.1.20`, `src/server/conn/auto/mod.rs`.  HTTP/2 prior knowledge is
+//! supported; HTTP/1.1 `h2c` upgrades remain intentionally out of scope.
 
 use bytes::{Buf, Bytes};
 use hyper::rt::{Read, ReadBuf, ReadBufCursor, Write};
@@ -26,6 +25,40 @@ const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
+
+/// I/O accepted by the automatic connection driver.
+///
+/// Upgrade-enabled H1 drivers require a sendable stream because Hyper moves
+/// the raw upgraded stream into the application-owned upgrade future.  The
+/// non-upgrade build keeps the historical `Read + Write + Unpin` contract.
+#[cfg(feature = "upgrade")]
+pub trait ConnectionIo: Read + Write + Unpin + Send {}
+
+#[cfg(feature = "upgrade")]
+impl<T: Read + Write + Unpin + Send> ConnectionIo for T {}
+
+#[cfg(not(feature = "upgrade"))]
+pub trait ConnectionIo: Read + Write + Unpin {}
+
+#[cfg(not(feature = "upgrade"))]
+impl<T: Read + Write + Unpin> ConnectionIo for T {}
+
+/// TLS transport accepted by [`Builder::serve_tls_connection`].
+///
+/// The upgrade build requires a sendable TLS stream for the same reason as
+/// [`ConnectionIo`]; non-upgrade builds preserve the original async-I/O
+/// bounds.
+#[cfg(feature = "upgrade")]
+pub trait TlsIo: futures_io::AsyncRead + futures_io::AsyncWrite + Unpin + Send {}
+
+#[cfg(feature = "upgrade")]
+impl<T: futures_io::AsyncRead + futures_io::AsyncWrite + Unpin + Send> TlsIo for T {}
+
+#[cfg(not(feature = "upgrade"))]
+pub trait TlsIo: futures_io::AsyncRead + futures_io::AsyncWrite + Unpin {}
+
+#[cfg(not(feature = "upgrade"))]
+impl<T: futures_io::AsyncRead + futures_io::AsyncWrite + Unpin> TlsIo for T {}
 
 /// A read buffer that replays bytes consumed by protocol detection before
 /// reading from the accepted connection.
@@ -336,15 +369,19 @@ impl<E> Builder<E> {
         S::Error: Into<Error>,
         B: http_body::Body + 'static,
         B::Error: Into<Error>,
-        I: Read + Write + Unpin + 'static,
+        I: ConnectionIo + 'static,
         E: HttpServerConnExec<S::Future, B>,
     {
         let state = match self.version {
             #[cfg(feature = "http1")]
             Some(Version::H1) => {
                 let io = Rewind::new_buffered(io, Bytes::new());
+                #[cfg(feature = "upgrade")]
+                let conn = self.http1.serve_connection(io, service).with_upgrades();
+                #[cfg(not(feature = "upgrade"))]
+                let conn = self.http1.serve_connection(io, service);
                 ConnState::H1 {
-                    conn: self.http1.serve_connection(io, service),
+                    conn,
                 }
             }
             #[cfg(feature = "http2")]
@@ -378,14 +415,14 @@ impl<E> Builder<E> {
     ///
     /// The caller owns TLS acceptance (for example, by passing an
     /// `async_net::TcpStream` to `TlsAcceptor::accept`). This method applies
-    /// [`crate::io::FuturesIo`] after the handshake, preserving the low-level,
+/// [`h12tiny_core::io::FuturesIo`] after the handshake, preserving the low-level,
     /// runtime-neutral server surface while making ALPN dispatch explicit.
     #[cfg(feature = "tls")]
     pub fn serve_tls_connection<I, S, B>(
         &self,
         io: futures_rustls::server::TlsStream<I>,
         service: S,
-    ) -> Result<Connection<'static, crate::io::FuturesIo<futures_rustls::server::TlsStream<I>>, S, E>>
+    ) -> Result<Connection<'static, h12tiny_core::io::FuturesIo<futures_rustls::server::TlsStream<I>>, S, E>>
     where
         E: Clone + HttpServerConnExec<S::Future, B>,
         S: hyper::service::Service<
@@ -396,7 +433,7 @@ impl<E> Builder<E> {
         S::Error: Into<Error>,
         B: http_body::Body + 'static,
         B::Error: Into<Error>,
-        I: futures_io::AsyncRead + futures_io::AsyncWrite + Unpin + 'static,
+        I: TlsIo + 'static,
     {
         match io.get_ref().1.alpn_protocol() {
             Some(b"h2") => {
@@ -404,7 +441,7 @@ impl<E> Builder<E> {
                 {
                     let builder = self.clone().http2_only();
                     return Ok(builder
-                        .serve_connection(crate::io::FuturesIo::new(io), service)
+                        .serve_connection(h12tiny_core::io::FuturesIo::new(io), service)
                         .into_owned());
                 }
                 #[cfg(not(feature = "http2"))]
@@ -418,7 +455,7 @@ impl<E> Builder<E> {
                 {
                     let builder = self.clone().http1_only();
                     return Ok(builder
-                        .serve_connection(crate::io::FuturesIo::new(io), service)
+                        .serve_connection(h12tiny_core::io::FuturesIo::new(io), service)
                         .into_owned());
                 }
                 #[cfg(not(feature = "http1"))]
@@ -436,8 +473,11 @@ impl<E> Builder<E> {
     }
 }
 
-#[cfg(feature = "http1")]
+#[cfg(all(feature = "http1", not(feature = "upgrade")))]
 type Http1Connection<I, S> = hyper::server::conn::http1::Connection<Rewind<I>, S>;
+
+#[cfg(all(feature = "http1", feature = "upgrade"))]
+type Http1Connection<I, S> = hyper::server::conn::http1::UpgradeableConnection<Rewind<I>, S>;
 
 #[cfg(not(feature = "http1"))]
 type Http1Connection<I, S> = (PhantomData<I>, PhantomData<S>);
@@ -511,7 +551,7 @@ impl<I, S, E, B> Connection<'_, I, S, E>
 where
     S: hyper::service::HttpService<hyper::body::Incoming, ResBody = B>,
     S::Error: Into<Error>,
-    I: Read + Write + Unpin,
+    I: ConnectionIo,
     B: http_body::Body + 'static,
     B::Error: Into<Error>,
     E: HttpServerConnExec<S::Future, B>,
@@ -571,7 +611,7 @@ where
     S::Error: Into<Error>,
     B: http_body::Body + 'static,
     B::Error: Into<Error>,
-    I: Read + Write + Unpin + 'static,
+    I: ConnectionIo + 'static,
     E: HttpServerConnExec<S::Future, B>,
 {
     type Output = Result<()>;
@@ -590,6 +630,9 @@ where
                     match version {
                         #[cfg(feature = "http1")]
                         Version::H1 => {
+                            #[cfg(feature = "upgrade")]
+                            let conn = builder.http1.serve_connection(io, service).with_upgrades();
+                            #[cfg(not(feature = "upgrade"))]
                             let conn = builder.http1.serve_connection(io, service);
                             this.state.set(ConnState::H1 { conn });
                         }

@@ -20,7 +20,7 @@ use futures_channel::oneshot;
 use futures_util::future;
 
 use super::{DebugEvent, DebugEventLog};
-use crate::runtime::BoxExecutor;
+use h12tiny_core::runtime::BoxExecutor;
 
 /// An item that can participate in a pool. The pool knows no protocol
 /// details; the client supplies the H1/H2 reservation semantics here.
@@ -648,7 +648,7 @@ mod tests {
     use futures_lite::future::block_on;
 
     use super::{Checkout, CheckoutError, Config, Connecting, Pool, Poolable, Protocol, Reservation, WeakOpt};
-    use crate::runtime::{AsyncIoTimer, BoxExecutor, BoxSendFuture};
+    use h12tiny_core::runtime::{AsyncIoTimer, BoxExecutor, BoxSendFuture};
 
     #[derive(Debug, PartialEq, Eq)]
     struct Unique(u8);

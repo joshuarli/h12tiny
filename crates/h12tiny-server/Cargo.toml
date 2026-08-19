@@ -1,0 +1,31 @@
+[package]
+name = "h12tiny-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Runtime-neutral HTTP server primitives for h12tiny"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+http1 = ["hyper/server", "hyper/http1"]
+http2 = ["hyper/server", "hyper/http2"]
+tls = ["dep:futures-rustls", "dep:rustls"]
+upgrade = ["http1"]
+
+[dependencies]
+async-net = { workspace = true }
+bytes = { workspace = true }
+futures-channel = { workspace = true }
+futures-io = { workspace = true }
+futures-rustls = { workspace = true, optional = true }
+futures-util = { workspace = true }
+h12tiny-core = { path = "../h12tiny-core", default-features = false }
+http = { workspace = true }
+http-body = { workspace = true }
+hyper = { workspace = true }
+pin-project-lite = { workspace = true }
+rustls = { workspace = true, optional = true }
+
+[dev-dependencies]
+futures-lite = { workspace = true }

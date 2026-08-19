@@ -1,18 +1,26 @@
 #!/usr/bin/env sh
-# Check only the enabled *normal* dependency graph.  Cargo.lock is deliberately
+# Check only an enabled *normal* dependency graph. Cargo.lock is deliberately
 # not inspected: dev and optional dependencies are allowed to exist there.
+# With no arguments, audit the facade's `full` production configuration rather
+# than its intentionally empty default feature set. Callers can pass another
+# Cargo feature selection to inspect a narrower configuration.
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 manifest="$script_dir/../Cargo.toml"
+
+if [ "$#" -eq 0 ]; then
+    set -- --features full
+fi
 
 tree=$(cargo tree --manifest-path "$manifest" -e normal --prefix none "$@")
 
 # Keep this list synchronized with plan.md.  Names are matched as Cargo package
 # names (the first whitespace-delimited field), not as substrings, so a package
 # such as `tokio-metrics` cannot hide a direct `tokio` match and unrelated names
-# do not produce false positives.  libc is intentionally absent: both direct
-# and transitive libc are permitted by the dependency policy.
+# do not produce false positives. `libc` is intentionally absent: both direct
+# and transitive libc are permitted. Serde is also absent because it is an
+# explicitly optional util/web feature, never a core transport dependency.
 forbidden='\
 tokio
 tokio-util
@@ -24,8 +32,6 @@ tower-layer
 axum
 async-trait
 url
-serde
-serde_json
 mime
 cookie
 socket2

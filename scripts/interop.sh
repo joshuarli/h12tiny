@@ -2,7 +2,7 @@
 # Check an already-running h12tiny example server and an independent H2 peer.
 #
 # Start the local fixture with:
-#   cargo run --release --example interop-server
+#   cargo run --release --features server,http1,http2,tls --example interop-server
 # Then run this script with endpoint URLs, for example:
 #   H12TINY_HTTP1_URL=http://127.0.0.1:3000/1k \
 #   H12TINY_HTTPS_URL=https://127.0.0.1:3443/1k \
@@ -87,5 +87,6 @@ nghttp -y -nv "$https_url"
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 echo "h12tiny client -> independent H2 endpoint: $nghttpd_url"
-cargo run --manifest-path "$repo_dir/Cargo.toml" --release --example client-load -- \
+cargo run --manifest-path "$repo_dir/Cargo.toml" --release \
+    --features client,http1,http2,tls --example client-load -- \
     "$nghttpd_url" --http2 --requests 1 --concurrency 1

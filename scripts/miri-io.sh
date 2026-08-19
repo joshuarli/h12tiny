@@ -2,4 +2,4 @@
 # Focused memory-model check for the sole unsafe adapter boundary.
 set -eu
 
-cargo +nightly miri test --all-features io::tests
+cargo +nightly miri test -p h12tiny-core io::tests

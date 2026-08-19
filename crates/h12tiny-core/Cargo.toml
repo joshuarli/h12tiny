@@ -1,0 +1,15 @@
+[package]
+name = "h12tiny-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Runtime-neutral low-level facilities for h12tiny"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+async-io = { workspace = true }
+futures-io = { workspace = true }
+hyper = { workspace = true }
+
+[dev-dependencies]
+futures-io = { workspace = true }

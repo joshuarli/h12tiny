@@ -40,6 +40,41 @@ impl<T> FuturesIo<T> {
     }
 }
 
+/// Wrap a Hyper runtime stream for use with futures-I/O consumers.
+///
+/// This is the inverse of [`FuturesIo`]. It is useful after a raw HTTP/1
+/// upgrade: Hyper returns an [`hyper::upgrade::Upgraded`] stream implementing
+/// its runtime traits, while application-selected framing libraries may use
+/// `futures_io::AsyncRead` and `AsyncWrite`.
+///
+/// The adapter has no framing policy. In particular, it does not implement a
+/// WebSocket handshake or any upgraded protocol; it only translates the two
+/// poll-based I/O contracts.
+#[derive(Debug)]
+pub struct HyperIo<T>(pub T);
+
+impl<T> HyperIo<T> {
+    /// Wrap a Hyper runtime stream.
+    pub fn new(inner: T) -> Self {
+        Self(inner)
+    }
+
+    /// Borrow the wrapped stream.
+    pub fn inner(&self) -> &T {
+        &self.0
+    }
+
+    /// Mutably borrow the wrapped stream.
+    pub fn inner_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
+
+    /// Unwrap the stream.
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
 impl<T> hyper::rt::Read for FuturesIo<T>
 where
     T: futures_io::AsyncRead,
@@ -162,9 +197,91 @@ where
     }
 }
 
+impl<T> futures_io::AsyncRead for HyperIo<T>
+where
+    T: hyper::rt::Read,
+{
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        // `HyperIo<T>` has no custom drop implementation and its only field
+        // is structurally pinned, exactly as in the reverse adapter above.
+        let mut inner = unsafe {
+            // SAFETY: the projection does not move `T`; the pinned reference
+            // remains valid for the duration of Hyper's poll call.
+            self.map_unchecked_mut(|this| &mut this.0)
+        };
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
+        // Futures-I/O supplies initialized byte storage, so Hyper can use a
+        // safe `ReadBuf::new` and report progress through its filled length.
+        let mut read_buf = hyper::rt::ReadBuf::new(buf);
+        match hyper::rt::Read::poll_read(inner.as_mut(), cx, read_buf.unfilled()) {
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl<T> futures_io::AsyncWrite for HyperIo<T>
+where
+    T: hyper::rt::Write,
+{
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let mut inner = unsafe {
+            // SAFETY: see the corresponding `AsyncRead` projection.
+            self.map_unchecked_mut(|this| &mut this.0)
+        };
+        hyper::rt::Write::poll_write(inner.as_mut(), cx, buf)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        let mut inner = unsafe {
+            // SAFETY: see the corresponding `AsyncRead` projection.
+            self.map_unchecked_mut(|this| &mut this.0)
+        };
+        hyper::rt::Write::poll_write_vectored(inner.as_mut(), cx, bufs)
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let mut inner = unsafe {
+            // SAFETY: see the corresponding `AsyncRead` projection.
+            self.map_unchecked_mut(|this| &mut this.0)
+        };
+        hyper::rt::Write::poll_flush(inner.as_mut(), cx)
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let mut inner = unsafe {
+            // SAFETY: see the corresponding `AsyncRead` projection.
+            self.map_unchecked_mut(|this| &mut this.0)
+        };
+        hyper::rt::Write::poll_shutdown(inner.as_mut(), cx)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::FuturesIo;
+    use super::{FuturesIo, HyperIo};
     use futures_io::{AsyncRead, AsyncWrite};
     use hyper::rt::{Read, ReadBuf, Write};
     use std::io::{self, IoSlice};
@@ -333,5 +450,78 @@ mod tests {
             Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::InvalidData
         ));
         assert!(read_buf.filled().is_empty());
+    }
+
+    #[test]
+    fn hyper_io_adapts_runtime_streams_to_futures_io() {
+        #[derive(Debug)]
+        struct HyperMemoryIo {
+            input: &'static [u8],
+            output: Vec<u8>,
+            closed: bool,
+        }
+
+        impl Read for HyperMemoryIo {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                mut buf: hyper::rt::ReadBufCursor<'_>,
+            ) -> Poll<io::Result<()>> {
+                let count = self.input.len().min(buf.remaining());
+                buf.put_slice(&self.input[..count]);
+                self.input = &self.input[count..];
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        impl Write for HyperMemoryIo {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                self.output.extend_from_slice(buf);
+                Poll::Ready(Ok(buf.len()))
+            }
+
+            fn poll_flush(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn poll_shutdown(
+                mut self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<io::Result<()>> {
+                self.closed = true;
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let mut stream = HyperIo::new(HyperMemoryIo {
+            input: b"hello",
+            output: Vec::new(),
+            closed: false,
+        });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut read = [0_u8; 8];
+        assert!(matches!(
+            AsyncRead::poll_read(Pin::new(&mut stream), &mut cx, &mut read),
+            Poll::Ready(Ok(5))
+        ));
+        assert_eq!(&read[..5], b"hello");
+        assert!(matches!(
+            AsyncWrite::poll_write(Pin::new(&mut stream), &mut cx, b"world"),
+            Poll::Ready(Ok(5))
+        ));
+        assert!(matches!(
+            AsyncWrite::poll_close(Pin::new(&mut stream), &mut cx),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(stream.inner().output, b"world");
+        assert!(stream.inner().closed);
     }
 }
