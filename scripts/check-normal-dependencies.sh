@@ -15,7 +15,7 @@ fi
 
 tree=$(cargo tree --manifest-path "$manifest" -e normal --prefix none "$@")
 
-# Keep this list synchronized with plan.md.  Names are matched as Cargo package
+# Keep this list synchronized with AGENTS.md. Names are matched as Cargo package
 # names (the first whitespace-delimited field), not as substrings, so a package
 # such as `tokio-metrics` cannot hide a direct `tokio` match and unrelated names
 # do not produce false positives. `libc` is intentionally absent: both direct
