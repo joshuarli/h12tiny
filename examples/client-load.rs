@@ -55,6 +55,7 @@ struct Options {
     requests: usize,
     concurrency: usize,
     http2: bool,
+    debug_events: bool,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -120,10 +121,12 @@ impl Drop for InFlight {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run --release --example client-load -- URI [--requests N] [--concurrency N] [--http2]\n\n\
+    "usage: cargo run --release --example client-load -- URI [--requests N] [--concurrency N] [--http2] [--debug-events]\n\n\
 URI should end in /0, /1k, or /64k when body-size validation is desired.\n\
 HTTPS uses the system web PKI; the committed localhost fixture is intended\n\
-for the server-side curl/nghttp checks, not for this default client policy."
+for the server-side curl/nghttp checks, not for this default client policy.\n\n\
+--debug-events retains endpoint lifecycle observations and is intended for\n\
+diagnostic runs, not throughput or memory measurements."
 }
 
 fn positive(value: &str, flag: &str) -> Result<usize, String> {
@@ -136,8 +139,8 @@ fn positive(value: &str, flag: &str) -> Result<usize, String> {
     Ok(value)
 }
 
-fn options() -> Result<Options, String> {
-    let mut args = env::args().skip(1);
+fn parse_options(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
+    let mut args = args.into_iter();
     let Some(first) = args.next() else {
         return Err(usage().to_owned());
     };
@@ -151,6 +154,7 @@ fn options() -> Result<Options, String> {
     let mut requests = 1_000;
     let mut concurrency = 16;
     let mut http2 = false;
+    let mut debug_events = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--requests" => {
@@ -162,6 +166,7 @@ fn options() -> Result<Options, String> {
                 concurrency = positive(&value, "--concurrency")?;
             }
             "--http2" => http2 = true,
+            "--debug-events" => debug_events = true,
             "--help" | "-h" => {
                 println!("{}", usage());
                 std::process::exit(0);
@@ -174,7 +179,12 @@ fn options() -> Result<Options, String> {
         requests,
         concurrency,
         http2,
+        debug_events,
     })
+}
+
+fn options() -> Result<Options, String> {
+    parse_options(env::args().skip(1))
 }
 
 fn expected_body_len(uri: &Uri) -> Option<usize> {
@@ -229,8 +239,10 @@ fn main() {
         if options.http2 {
             builder.http2_only(true);
         }
-        let debug_events = DebugEventLog::default();
-        builder.debug_event_log(debug_events.clone());
+        let debug_events = options.debug_events.then(DebugEventLog::default);
+        if let Some(debug_events) = &debug_events {
+            builder.debug_event_log(debug_events.clone());
+        }
         let client = builder.build::<EmptyBody>();
         let expected = expected_body_len(&options.uri);
         let concurrency = Concurrency::default();
@@ -277,7 +289,6 @@ fn main() {
         }
         let elapsed = started.elapsed();
         let seconds = elapsed.as_secs_f64();
-        let event_counts = count_events(debug_events.drain());
         println!("uri={}", options.uri);
         println!("protocol={}", if options.http2 { "h2" } else { "auto" });
         println!("requests={}", options.requests);
@@ -291,10 +302,16 @@ fn main() {
         println!("body_mismatches={body_mismatches}");
         println!("http1_responses={http11}");
         println!("http2_responses={http2}");
-        println!("tcp_connections={}", event_counts.tcp_connections);
-        println!("tls_handshakes={}", event_counts.tls_handshakes);
-        println!("h1_connections={}", event_counts.h1_connections);
-        println!("h2_sessions={}", event_counts.h2_sessions);
+        if let Some(debug_events) = debug_events {
+            let event_counts = count_events(debug_events.drain());
+            println!("debug_events=enabled");
+            println!("tcp_connections={}", event_counts.tcp_connections);
+            println!("tls_handshakes={}", event_counts.tls_handshakes);
+            println!("h1_connections={}", event_counts.h1_connections);
+            println!("h2_sessions={}", event_counts.h2_sessions);
+        } else {
+            println!("debug_events=disabled");
+        }
         if errors != 0 || body_mismatches != 0 {
             return Err("load run did not complete cleanly".to_owned());
         }
@@ -357,5 +374,19 @@ mod tests {
         assert_eq!(concurrency.peak(), 2);
         drop(first);
         assert_eq!(concurrency.in_flight.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn debug_event_collection_is_opt_in() {
+        let default = parse_options(vec!["http://example.test/64k".to_owned()])
+            .expect("default benchmark options must parse");
+        assert!(!default.debug_events);
+
+        let diagnostic = parse_options(vec![
+            "http://example.test/64k".to_owned(),
+            "--debug-events".to_owned(),
+        ])
+        .expect("diagnostic benchmark options must parse");
+        assert!(diagnostic.debug_events);
     }
 }

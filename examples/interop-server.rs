@@ -7,83 +7,20 @@
 //! `http/1.1` through ALPN.  This is intentionally a low-level example, not
 //! a general-purpose HTTP server or router.
 
-use std::convert::Infallible;
 use std::env;
-use std::future::{ready, Ready};
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use async_net::TcpListener;
-use bytes::Bytes;
 use futures_rustls::TlsAcceptor;
 use h12tiny::io::FuturesIo;
-use h12tiny::runtime::{BoxExecutor, BoxSendFuture};
+use h12tiny::runtime::BoxExecutor;
 use h12tiny::server::conn::auto;
-use http::{Request, Response, StatusCode};
-use http_body::{Body, Frame};
-use hyper::body::Incoming;
-use hyper::service::Service;
 
-static BODY_1K: [u8; 1024] = [b'x'; 1024];
-static BODY_64K: [u8; 64 * 1024] = [b'x'; 64 * 1024];
-
-#[derive(Clone, Copy, Debug)]
-struct SmolExecutor;
-
-impl hyper::rt::Executor<BoxSendFuture> for SmolExecutor {
-    fn execute(&self, future: BoxSendFuture) {
-        smol::spawn(future).detach();
-    }
+mod support {
+    pub mod benchmark;
 }
 
-#[derive(Debug)]
-struct OneFrameBody(Option<Bytes>);
-
-impl OneFrameBody {
-    fn from_bytes(body: Bytes) -> Self {
-        Self((!body.is_empty()).then_some(body))
-    }
-}
-
-impl Body for OneFrameBody {
-    type Data = Bytes;
-    type Error = Infallible;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        _: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        Poll::Ready(self.0.take().map(|body| Ok(Frame::data(body))))
-    }
-
-    fn is_end_stream(&self) -> bool {
-        self.0.is_none()
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct BenchmarkService;
-
-impl Service<Request<Incoming>> for BenchmarkService {
-    type Response = Response<OneFrameBody>;
-    type Error = Infallible;
-    type Future = Ready<Result<Self::Response, Self::Error>>;
-
-    fn call(&self, request: Request<Incoming>) -> Self::Future {
-        let (status, body) = match request.uri().path() {
-            "/0" => (StatusCode::OK, Bytes::new()),
-            "/1k" => (StatusCode::OK, Bytes::from_static(&BODY_1K)),
-            "/64k" => (StatusCode::OK, Bytes::from_static(&BODY_64K)),
-            _ => (StatusCode::NOT_FOUND, Bytes::from_static(b"use /0, /1k, or /64k\n")),
-        };
-        ready(Ok(Response::builder()
-            .status(status)
-            .header("content-type", "application/octet-stream")
-            .body(OneFrameBody::from_bytes(body))
-            .expect("benchmark response builder is valid")))
-    }
-}
+use support::benchmark::{BenchmarkService, SmolExecutor};
 
 fn tls_config() -> rustls::ServerConfig {
     use futures_rustls::pki_types::{CertificateDer, PrivateKeyDer};

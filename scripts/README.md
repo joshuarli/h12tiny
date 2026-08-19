@@ -45,10 +45,25 @@ bits, `20` connection bits) so results do not silently represent an
 effectively unlimited-flow-control workload. See `--help` on either script
 for all environment controls.
 
-`client-load` also prints its configured and observed request concurrency plus
-event-derived `tcp_connections`, `tls_handshakes`, `h1_connections`, and
-`h2_sessions`. These are diagnostic counts for a single run, not a benchmark
-score or a replacement for server-side metrics.
+For a same-runtime H2 attribution check, start the direct-Hyper reference in a
+second terminal. It shares `interop-server`'s listener, futures-I/O adapter,
+executor, service, headers, and `/0`/`/1k`/`/64k` bodies, but calls Hyper's H2
+builder without h12tiny-server's auto protocol selection or lifecycle layer:
+
+```sh
+cargo run --release --features server,http2 --example h2-reference-server
+```
+
+Then set `H12TINY_REFERENCE_HTTP2_URL=http://127.0.0.1:3001/64k` when running
+`bench.sh`. Treat this as endpoint-layer attribution, not an upstream Tokio or
+cross-language comparison.
+
+`client-load` defaults to no retained diagnostics, so its throughput and RSS
+measurements do not accumulate a lifecycle event per request. Pass
+`--debug-events` only when a diagnostic run needs event-derived
+`tcp_connections`, `tls_handshakes`, `h1_connections`, and `h2_sessions`.
+Those observations are single-run diagnostics, not a benchmark score or a
+replacement for server-side metrics.
 
 ## Dependency policy check
 

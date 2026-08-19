@@ -184,7 +184,7 @@ async fn read_head(stream: &mut async_net::TcpStream) -> Vec<u8> {
 
 #[cfg(feature = "http1")]
 #[test]
-fn stale_idle_h1_socket_is_evicted_after_failed_dispatch() {
+fn stale_idle_h1_socket_is_evicted_before_or_during_next_dispatch() {
     smol::block_on(async {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -205,12 +205,17 @@ fn stale_idle_h1_socket_is_evicted_after_failed_dispatch() {
             closed_tx.send(()).unwrap();
 
             let (mut replacement, _) = listener.accept().await.unwrap();
-            let request = read_head(&mut replacement).await;
-            replacement
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                .await
-                .unwrap();
-            replacement_tx.send(request).unwrap();
+            loop {
+                let request = read_head(&mut replacement).await;
+                replacement
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                    .await
+                    .unwrap();
+                if request.starts_with(b"GET /replacement HTTP/1.1") {
+                    replacement_tx.send(request).unwrap();
+                    break;
+                }
+            }
         });
 
         let events = DebugEventLog::default();
@@ -254,13 +259,20 @@ fn stale_idle_h1_socket_is_evicted_after_failed_dispatch() {
                     .body(FullBody::empty())
                     .unwrap(),
             )
-            .await
-            .unwrap_err();
-        // Hyper has already accepted this request for serialization, so the
-        // endpoint cannot prove that a peer did not receive part of it. It is
-        // therefore correct to preserve the dispatch failure rather than
-        // risk replaying an unsafe method/body automatically.
-        assert_eq!(stale.kind(), ErrorKind::SendRequest);
+            .await;
+        match stale {
+            // The close reached Hyper after it accepted the request for
+            // serialization. The endpoint must surface that indeterminate
+            // dispatch rather than replay an arbitrary method/body.
+            Err(error) => assert_eq!(error.kind(), ErrorKind::SendRequest),
+            // The driver observed the peer close before checkout. Reopening a
+            // connection before serializing this request is equally correct;
+            // it is the race-free form of stale-idle eviction.
+            Ok(response) => {
+                assert_eq!(response.status(), StatusCode::OK);
+                drop(response);
+            }
+        }
 
         let replacement = client
             .request(

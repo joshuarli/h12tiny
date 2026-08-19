@@ -22,6 +22,9 @@ base directories. Environment controls:
   H12TINY_REQUESTS       total requests (default: 10000)
   H12TINY_CONNECTIONS    client connections/concurrency (default: 16)
   H12TINY_STREAMS        concurrent H2 streams per connection (default: 16)
+  H12TINY_REFERENCE_HTTP2_URL
+                         optional direct-Hyper H2 reference endpoint; when set,
+                         run the same h2load measurement against it
   H12TINY_INSECURE       pass --insecure to oha (default: 0)
   H12TINY_H2_WINDOW_BITS stream window bits for h2load (default: 16)
   H12TINY_H2_CONN_WINDOW_BITS connection window bits (default: 20)
@@ -51,6 +54,7 @@ require_tool h2load
 
 http1_url=${H12TINY_HTTP1_URL:?set H12TINY_HTTP1_URL to an HTTP/1.1 endpoint}
 http2_url=${H12TINY_HTTP2_URL:?set H12TINY_HTTP2_URL to an HTTP/2 endpoint}
+reference_http2_url=${H12TINY_REFERENCE_HTTP2_URL:-}
 requests=${H12TINY_REQUESTS:-10000}
 connections=${H12TINY_CONNECTIONS:-16}
 streams=${H12TINY_STREAMS:-16}
@@ -90,3 +94,9 @@ fi
 echo "H2 specialist: requests=$requests clients=$connections streams=$streams window_bits=$window_bits connection_window_bits=$connection_window_bits"
 h2load -n "$requests" -c "$connections" -m "$streams" \
     -w "$window_bits" -W "$connection_window_bits" "$http2_url"
+
+if [ -n "$reference_http2_url" ]; then
+    echo "H2 direct-Hyper reference: requests=$requests clients=$connections streams=$streams window_bits=$window_bits connection_window_bits=$connection_window_bits"
+    h2load -n "$requests" -c "$connections" -m "$streams" \
+        -w "$window_bits" -W "$connection_window_bits" "$reference_http2_url"
+fi
