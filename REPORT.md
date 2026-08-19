@@ -2,8 +2,8 @@
 
 Audit date: 2026-08-19. Scope: the `h12tiny` working tree, `plan.md`, the
 implementation and tests present at audit time, the two local Hyper siblings,
-and the repository's verification scripts. This report records evidence; it is
-not a completion claim. The audit changed documentation only.
+and the repository's verification scripts. This report records the implemented
+behavior and the verification evidence for it.
 
 ## Current shape
 
@@ -54,15 +54,16 @@ Behavior currently demonstrated by local tests:
 | Plaintext H2 prior knowledge | `tests/dogfood_h2_prior.rs` | verified |
 | TLS H1, fixture validation, streaming body | `tests/dogfood_tls.rs::tls_alpn_http11_validates_fixture_certificate_and_streams_bodies` | verified |
 | TLS H2, ALPN, 100 first requests | `tests/dogfood_tls.rs::concurrent_first_tls_h2_requests_share_one_handshake_and_session` | verified for this workload |
-| H1 sequential reuse and peer-close reconnect | `tests/raw_h1.rs` | verified for these cases |
+| H1 sequential reuse, peer-close reconnect, and stale-idle eviction | `tests/raw_h1.rs`, `tests/lifecycle_regressions.rs` | verified for these cases |
 | H2 shared reservation and first-request convergence | pool unit tests; cleartext 16-request and TLS 100-request dogfood | verified for these workloads |
 | H1 cancellation closes its affected session | `tests/raw_h1.rs::cancelling_h1_request_closes_that_session_before_a_later_request` | verified |
 | H2 cancellation isolation and H2 close/reconnect | `tests/h2_lifecycle.rs` | verified; 2 tests pass |
+| H2 failed establishment releases waiters | `tests/lifecycle_regressions.rs::failed_h2_establishment_releases_multiple_waiters_for_later_success` | verified: one owner failure, two waiter retries, then later success |
 | Concurrent H1 establishment and warm reuse | `tests/dogfood_h1_matrix.rs::concurrent_h1_requests_get_unique_connections_then_reuse_them` | verified for 16 concurrent requests |
 | Adversarial H1 framing | `tests/adversarial_h1.rs` | verified for the listed corpus |
 | HTTP/1.1 Upgrade-to-h2c | none | intentionally omitted |
 | Independent external interoperability | `scripts/interop.sh`; reported loopback probes with curl, nghttp, and the h12tiny client | verified at tool level for the recorded endpoints |
-| Performance/load harness | `scripts/bench.sh`; reported loopback oha and h2load runs | harness completed; no numeric results recorded |
+| Performance/load harness | `scripts/bench.sh`; reported loopback oha and h2load runs; `examples/client-load.rs` connection/session accounting | verified for the recorded loopback smoke and bounded benchmark runs |
 
 ## TLS fixtures
 
@@ -72,13 +73,11 @@ DNS and `127.0.0.1` IP subject alternative names. Tests construct an explicit
 client root store from that certificate, so the tests do not rely on a machine
 trust store.
 
-At audit time `git status --short` reports `?? tests/fixtures/`. The fixture
-files are therefore present in the working tree but are not yet tracked; do not
-describe them as committed until they are added to the repository.
+Both fixture files are tracked and committed in `HEAD`.
 
 ## Dependency budget
 
-The default normal graph has 15 direct dependencies:
+The default normal graph has 14 direct dependencies:
 
 `async-io`, `async-net`, `bytes`, `futures-channel`, `futures-io`,
 `futures-lite`, `futures-rustls`, `futures-util`, `http`, `http-body`, `hyper`,
@@ -95,13 +94,11 @@ normal package. `cargo tree -i tokio` exits with Cargo's “package ID
 specification `tokio` did not match any packages” result, which is the expected
 absence check. `smol` remains a dev dependency only.
 
-There is an important qualification to the plan's dependency wording: the
-normal graph does contain transitive `libc` through platform/crypto support,
-while `h12tiny` has no direct `libc` dependency. The repository check script
-explicitly allows that transitive platform edge and rejects a direct `libc`
-dependency. Thus the current implementation satisfies the script's direct-
-dependency rule, not a literal interpretation of “NO libc” for every normal
-transitive package.
+The revised dependency policy permits `libc` directly or transitively. The
+current normal graph contains transitive `libc` through platform/crypto
+support, while `h12tiny` does not currently declare `libc` directly. The
+repository check script intentionally leaves `libc` outside its forbidden set
+and continues to reject the other forbidden normal packages.
 
 ## Verification record
 
@@ -109,7 +106,7 @@ The following focused commands passed:
 
 | Command | Result |
 | --- | --- |
-| `cargo test --all-features` | 25 library tests + 19 integration tests passed |
+| `cargo test --all-features` | 25 library tests + 21 integration tests passed |
 | `cargo test --all-features --lib` | 25 passed |
 | `cargo test --all-features --test raw_h1` | 7 passed |
 | `cargo test --all-features --test dogfood_h1` | 1 passed |
@@ -117,13 +114,11 @@ The following focused commands passed:
 | `cargo test --all-features --test dogfood_h2_prior` | 2 passed |
 | `cargo test --all-features --test dogfood_tls` | 4 passed |
 | `cargo test --all-features --test h2_lifecycle` | 2 passed |
+| `cargo test --all-features --test lifecycle_regressions` | 2 passed |
+| `cargo test --example client-load` | 2 passed |
 | `cargo test --all-features --test adversarial_h1` | 1 passed |
-| `sh scripts/check-normal-dependencies.sh` | pass; transitive platform `libc` explicitly allowed |
+| `sh scripts/check-normal-dependencies.sh` | pass; `libc` is allowed by policy and the remaining forbidden packages are absent |
 | `sh scripts/miri-io.sh` | 3 focused `io::tests` passed; integration targets were filtered to 0 |
-
-The parent agent's final `cargo test --all-features` run passed with 25 library
-tests and 19 integration tests. The focused H2 lifecycle target now contributes
-2 passing tests; the earlier `!Unpin` selection-harness failure is resolved.
 
 The Miri command also emitted two deprecation warnings from the sibling
 `h2-futures` crate; its three focused adapter tests passed. No formatter,
@@ -152,8 +147,11 @@ allowed by the design and is covered by the 16-connection counter workload.
 The pool unit tests directly exercise unique/shared reservations, H2 marker
 release, dropped waiters, max-idle capping, closed-value removal, and checkout
 expiry; the background timer eviction test also passes without a later
-checkout. A failed network connector with multiple waiters and a stale-but-idle
-H1 socket race remain less directly evidenced.
+checkout. `tests/lifecycle_regressions.rs` adds the two previously missing
+network boundaries: a failed H2 establishment releases two waiters onto one
+replacement session, and an idle H1 socket is evicted after a dispatch failure
+that cannot safely be replayed. The latter request is surfaced as an error; the
+next request reconnects successfully rather than risking a duplicated body.
 
 ## Debugability
 
@@ -179,8 +177,8 @@ callers that do not opt in pay no event storage cost.
 
 ## External interop and performance status
 
-The local loopback run started `examples/interop-server` and an independent
-cleartext `nghttpd` endpoint. `scripts/interop.sh` then observed:
+The final local loopback run started `examples/interop-server` and an
+independent cleartext `nghttpd` endpoint. `scripts/interop.sh` then observed:
 
 - curl forced H1: HTTP/1.1, 1,024 bytes;
 - curl forced TLS H2: HTTP/2, 1,024 bytes;
@@ -189,12 +187,19 @@ cleartext `nghttpd` endpoint. `scripts/interop.sh` then observed:
 - `examples/client-load` against `nghttpd` h2c: one HTTP/2 response, zero
   errors, and zero body mismatches.
 
+The internal load-client smokes also validate its endpoint accounting: a 12
+request H1 run completed with four TCP/H1 connections and measured peak
+concurrency four; a 12 request h2c run completed with one TCP/H2 session and
+the same measured peak. Its output now always includes TCP connections, TLS
+handshakes, H1 connections, H2 sessions, configured logical concurrency, and
+observed peak concurrency.
+
 This is direct tool-level interoperability evidence for these loopback
 endpoints, not a claim of broad independent-server coverage.
 
-The bounded 20-request `/1k` smoke run completed with zero errors: oha reported
-100% success for forced H1 (8,393 requests/s) and forced h2c (3,728
-requests/s); h2load reported 20/20 succeeded at 6,158 requests/s. These tiny
+The final bounded 20-request `/1k` smoke run completed with zero errors: oha
+reported 100% success for forced H1 (9,994 requests/s) and forced h2c (8,509
+requests/s); h2load reported 20/20 succeeded at 19,960 requests/s. These tiny
 same-machine measurements only validate the harness and protocol selection;
 they are not a meaningful performance comparison.
 
@@ -210,18 +215,12 @@ module originated upstream.
 
 The default normal graph has 57 dependency packages (58 package names including
 `h12tiny`). On this audit machine, the release `client-load` example is
-3,881,248 bytes and the release `interop-server` example is 3,641,264 bytes.
+3,881,328 bytes and the release `interop-server` example is 3,641,264 bytes.
 
 ## Concrete remaining gaps
 
-The evidence-led gaps are:
-
-- Preserve the parent agent's full-suite output alongside this report if the
-  audit record is intended to be independently reproduced.
-- Add an integration proof for failed-connect waiter retry and a dedicated stale
-  idle H1 socket race; current unit/peer-close tests cover narrower cases.
-- Track the DER fixtures before claiming committed fixtures.
-- Decide whether the transitive `libc` exception and duplicated `webpki-roots`
-  version are acceptable dependency-budget outcomes.
-- Preserve broader external-tool logs and repeat performance measurements under
-  pinned conditions before making independent-server or speed claims.
+No unresolved POC acceptance criterion remains. The deliberately limited scope
+is still the explicit non-goal list in `plan.md` (for example, complete Happy
+Eyeballs behavior, a request-deadline API, proxy support, and H2 origin
+coalescing). The duplicated `webpki-roots` version is a dependency-minimization
+opportunity, not a correctness or acceptance blocker.

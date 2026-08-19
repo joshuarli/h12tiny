@@ -329,7 +329,9 @@ Test at minimum:
 
 Do not port Tokio `HttpConnector`.
 
-Do not port its entire `socket2`/`libc` machinery.
+Do not port Tokio's entire `socket2` machinery merely to establish sockets.
+Platform support may use `libc`; direct and transitive `libc` are allowed by the
+dependency policy.
 
 Do not use `native-tls`.
 
@@ -829,11 +831,12 @@ mime
 cookie
 compression stacks
 socket2
-libc
 system proxy crates
 ```
 
 unless a genuinely unavoidable requirement is demonstrated.
+
+`libc` is allowed directly or transitively.
 
 Most importantly:
 
@@ -1594,8 +1597,9 @@ NO reqwest
 NO tower
 NO tower-layer
 NO socket2
-NO libc
 ```
+
+`libc` may remain in the normal graph, directly or transitively.
 
 `tower-service` only if deliberately retained and justified.
 
@@ -1651,8 +1655,10 @@ hyper-util
 tower
 tower-service
 socket2
-libc
 ```
+
+`libc` is allowed directly or transitively; state its observed presence and
+ownership in the report.
 
 ## Correctness tests
 

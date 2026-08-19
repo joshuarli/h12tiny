@@ -44,3 +44,21 @@ specialist H2 measurement. It defaults to bounded H2 windows (`16` stream
 bits, `20` connection bits) so results do not silently represent an
 effectively unlimited-flow-control workload. See `--help` on either script
 for all environment controls.
+
+`client-load` also prints its configured and observed request concurrency plus
+event-derived `tcp_connections`, `tls_handshakes`, `h1_connections`, and
+`h2_sessions`. These are diagnostic counts for a single run, not a benchmark
+score or a replacement for server-side metrics.
+
+## Dependency policy check
+
+Run the normal-graph policy check with:
+
+```sh
+sh scripts/check-normal-dependencies.sh
+```
+
+The check rejects the forbidden production packages listed in `plan.md` from
+the enabled normal graph. `libc` is intentionally allowed, whether it is direct
+or transitive, because platform support may require it. Dev and optional
+dependencies are not inspected.

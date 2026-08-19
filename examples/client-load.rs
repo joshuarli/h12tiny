@@ -2,18 +2,20 @@
 //!
 //! This intentionally uses a batch of futures rather than a benchmark
 //! framework. It reports elapsed time, throughput, protocol versions, errors,
-//! and deterministic body mismatches while leaving connection/session
-//! accounting to the server or specialist tools such as `h2load`.
+//! and deterministic body mismatches. Opt-in client debug events provide the
+//! connection/session counts without adding a metrics or logging dependency.
 
 use std::convert::Infallible;
 use std::env;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
 use bytes::Bytes;
 use futures_util::future::join_all;
-use h12tiny::client::Client;
+use h12tiny::client::{Client, ConnectionProtocol, DebugEvent, DebugEventLog};
 use h12tiny::runtime::BoxSendFuture;
 use http::Uri;
 use http_body::{Body, Frame};
@@ -53,6 +55,68 @@ struct Options {
     requests: usize,
     concurrency: usize,
     http2: bool,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct EventCounts {
+    tcp_connections: usize,
+    tls_handshakes: usize,
+    h1_connections: usize,
+    h2_sessions: usize,
+}
+
+fn count_events(events: impl IntoIterator<Item = DebugEvent>) -> EventCounts {
+    let mut counts = EventCounts::default();
+    for event in events {
+        match event {
+            // The client records this only after its direct connector has
+            // established the TCP (and, for HTTPS, TLS) transport.
+            DebugEvent::ConnectionEstablished { protocol, .. } => {
+                counts.tcp_connections += 1;
+                match protocol {
+                    ConnectionProtocol::Http1 => counts.h1_connections += 1,
+                    ConnectionProtocol::Http2 => counts.h2_sessions += 1,
+                    _ => {}
+                }
+            }
+            // The public event is emitted once the connector has completed a
+            // TLS handshake and observed ALPN. It is absent for cleartext.
+            DebugEvent::AlpnSelected { .. } => counts.tls_handshakes += 1,
+            _ => {}
+        }
+    }
+    counts
+}
+
+#[derive(Clone, Debug, Default)]
+struct Concurrency {
+    in_flight: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+}
+
+impl Concurrency {
+    fn enter(&self) -> InFlight {
+        let current = self.in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+        self.peak.fetch_max(current, Ordering::Relaxed);
+        InFlight {
+            in_flight: Arc::clone(&self.in_flight),
+        }
+    }
+
+    fn peak(&self) -> usize {
+        self.peak.load(Ordering::Relaxed)
+    }
+}
+
+#[derive(Debug)]
+struct InFlight {
+    in_flight: Arc<AtomicUsize>,
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.in_flight.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 fn usage() -> &'static str {
@@ -138,7 +202,9 @@ async fn one_request(
     client: Client<EmptyBody>,
     uri: Uri,
     expected: Option<usize>,
+    concurrency: Concurrency,
 ) -> Result<(http::Version, bool), String> {
+    let _in_flight = concurrency.enter();
     let response = client
         .get(uri)
         .await
@@ -163,8 +229,11 @@ fn main() {
         if options.http2 {
             builder.http2_only(true);
         }
+        let debug_events = DebugEventLog::default();
+        builder.debug_event_log(debug_events.clone());
         let client = builder.build::<EmptyBody>();
         let expected = expected_body_len(&options.uri);
+        let concurrency = Concurrency::default();
         let started = Instant::now();
         let mut completed = 0;
         let mut errors = 0;
@@ -175,7 +244,14 @@ fn main() {
         while completed < options.requests {
             let batch = (options.requests - completed).min(options.concurrency);
             let requests = (0..batch)
-                .map(|_| one_request(client.clone(), options.uri.clone(), expected))
+                .map(|_| {
+                    one_request(
+                        client.clone(),
+                        options.uri.clone(),
+                        expected,
+                        concurrency.clone(),
+                    )
+                })
                 .collect::<Vec<_>>();
             for result in join_all(requests).await {
                 match result {
@@ -201,10 +277,13 @@ fn main() {
         }
         let elapsed = started.elapsed();
         let seconds = elapsed.as_secs_f64();
+        let event_counts = count_events(debug_events.drain());
         println!("uri={}", options.uri);
         println!("protocol={}", if options.http2 { "h2" } else { "auto" });
         println!("requests={}", options.requests);
         println!("concurrency={}", options.concurrency);
+        println!("logical_concurrency={}", options.concurrency);
+        println!("peak_concurrency={}", concurrency.peak());
         println!("elapsed_seconds={seconds:.6}");
         println!("requests_per_second={:.3}", options.requests as f64 / seconds);
         println!("ok={}", options.requests - errors - body_mismatches);
@@ -212,6 +291,10 @@ fn main() {
         println!("body_mismatches={body_mismatches}");
         println!("http1_responses={http11}");
         println!("http2_responses={http2}");
+        println!("tcp_connections={}", event_counts.tcp_connections);
+        println!("tls_handshakes={}", event_counts.tls_handshakes);
+        println!("h1_connections={}", event_counts.h1_connections);
+        println!("h2_sessions={}", event_counts.h2_sessions);
         if errors != 0 || body_mismatches != 0 {
             return Err("load run did not complete cleanly".to_owned());
         }
@@ -220,5 +303,59 @@ fn main() {
     if let Err(error) = result {
         eprintln!("error: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_counts_report_transport_and_protocol_sessions() {
+        let events = [
+            DebugEvent::PoolCheckout {
+                origin: "http://example.test".to_owned(),
+            },
+            DebugEvent::ConnectionEstablished {
+                origin: "http://example.test".to_owned(),
+                protocol: ConnectionProtocol::Http1,
+            },
+            DebugEvent::ConnectionEstablished {
+                origin: "https://example.test".to_owned(),
+                protocol: ConnectionProtocol::Http2,
+            },
+            DebugEvent::AlpnSelected {
+                origin: "https://example.test".to_owned(),
+                protocol: ConnectionProtocol::Http2,
+            },
+            DebugEvent::ConnectionPooled {
+                origin: "https://example.test".to_owned(),
+            },
+        ];
+
+        assert_eq!(
+            count_events(events),
+            EventCounts {
+                tcp_connections: 2,
+                tls_handshakes: 1,
+                h1_connections: 1,
+                h2_sessions: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn concurrency_tracks_peak_until_each_request_finishes() {
+        let concurrency = Concurrency::default();
+        let first = concurrency.enter();
+        assert_eq!(concurrency.peak(), 1);
+        {
+            let second = concurrency.enter();
+            assert_eq!(concurrency.peak(), 2);
+            drop(second);
+        }
+        assert_eq!(concurrency.peak(), 2);
+        drop(first);
+        assert_eq!(concurrency.in_flight.load(Ordering::Relaxed), 0);
     }
 }

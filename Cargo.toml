@@ -48,8 +48,9 @@ pin-project-lite = "0.2"
 
 # async-net is the only socket/DNS surface.  Keeping it behind endpoint
 # features lets protocol-only builds compile without pulling networking code.
-# Its Unix polling backend brings libc transitively; h12tiny does not depend on
-# libc directly (the dependency check documents this unavoidable platform edge).
+# Its Unix polling backend may use libc. Direct and transitive libc are allowed
+# by the dependency policy; the check script rejects the remaining forbidden
+# normal packages.
 async-io = "2"
 async-net = { version = "2", optional = true }
 
