@@ -47,7 +47,11 @@ impl SocketPath {
                 NEXT_ID.fetch_add(1, Ordering::Relaxed)
             ));
             match std::fs::create_dir(&directory) {
-                Ok(()) => return Ok(Self { path: directory.join("server.sock") }),
+                Ok(()) => {
+                    return Ok(Self {
+                        path: directory.join("server.sock"),
+                    })
+                }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(error),
             }
@@ -79,15 +83,11 @@ fn unix_listener_serves_h1_and_drains_on_shutdown() {
         let listener = UnixListener::bind(socket.path()).expect("bind Unix listener");
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let server = smol::spawn(async move {
-            serve(
-                listener,
-                UnixService,
-                BoxExecutor::new(SmolExecutor),
-            )
-            .shutdown_on(async move {
-                let _ = shutdown_rx.await;
-            })
-            .await
+            serve(listener, UnixService, BoxExecutor::new(SmolExecutor))
+                .shutdown_on(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
         });
 
         let mut client = UnixStream::connect(socket.path())
@@ -105,7 +105,10 @@ fn unix_listener_serves_h1_and_drains_on_shutdown() {
             assert!(count > 0, "server closed before the H1 response body");
             response.extend_from_slice(&buffer[..count]);
         }
-        assert!(response.starts_with(b"HTTP/1.1 200"), "response: {response:?}");
+        assert!(
+            response.starts_with(b"HTTP/1.1 200"),
+            "response: {response:?}"
+        );
 
         shutdown_tx.send(()).expect("signal shutdown");
         server.await.expect("Unix lifecycle completed");

@@ -2,7 +2,10 @@
 
 use std::convert::Infallible;
 use std::pin::Pin;
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
@@ -186,7 +189,9 @@ pub fn fixture_client_config() -> rustls::ClientConfig {
 
     let certificate = CertificateDer::from(include_bytes!("../fixtures/tls/cert.der").to_vec());
     let mut roots = rustls::RootCertStore::empty();
-    roots.add(certificate).expect("fixture certificate is a valid root");
+    roots
+        .add(certificate)
+        .expect("fixture certificate is a valid root");
     let mut config = rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();

@@ -146,8 +146,7 @@ fn plaintext_h1_dogfood_covers_methods_lengths_streaming_and_keep_alive() {
         assert_eq!(records[3].body, b"stream");
         assert_eq!(records[4].method, Method::HEAD);
         assert!(records.iter().all(|record| {
-            record.content_length.as_deref()
-                == Some(record.body.len().to_string().as_str())
+            record.content_length.as_deref() == Some(record.body.len().to_string().as_str())
         }));
         assert_eq!(
             counters.snapshot(),

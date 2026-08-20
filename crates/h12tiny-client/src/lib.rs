@@ -26,7 +26,9 @@ use self::normalize::PoolKey;
 use self::pool::{CheckoutError, Poolable, Protocol as PoolProtocol, Reservation};
 use h12tiny_core::runtime::{AsyncIoTimer, BoxExecutor, BoxSendFuture};
 
-pub use connect::{Connected, ConnectionIo, Connector, ConnectorBuilder, DialError, DialFuture, Dialer};
+pub use connect::{
+    Connected, ConnectionIo, Connector, ConnectorBuilder, DialError, DialFuture, Dialer,
+};
 
 /// Errors are deliberately classified by the endpoint layer rather than
 /// exposing connector/protocol implementation types in the public contract.
@@ -113,13 +115,29 @@ pub enum ConnectionProtocol {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DebugEvent {
-    PoolCheckout { origin: String },
-    ConnectionEstablished { origin: String, protocol: ConnectionProtocol },
-    AlpnSelected { origin: String, protocol: ConnectionProtocol },
-    ConnectionPooled { origin: String },
-    PoolEvicted { origin: String },
-    ConnectionClosed { origin: String },
-    StaleRetry { origin: String },
+    PoolCheckout {
+        origin: String,
+    },
+    ConnectionEstablished {
+        origin: String,
+        protocol: ConnectionProtocol,
+    },
+    AlpnSelected {
+        origin: String,
+        protocol: ConnectionProtocol,
+    },
+    ConnectionPooled {
+        origin: String,
+    },
+    PoolEvicted {
+        origin: String,
+    },
+    ConnectionClosed {
+        origin: String,
+    },
+    StaleRetry {
+        origin: String,
+    },
 }
 
 /// An opt-in, dependency-free sink for client connection lifecycle events.
@@ -154,7 +172,9 @@ impl DebugEventLog {
 
 impl fmt::Debug for DebugEventLog {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("DebugEventLog").finish_non_exhaustive()
+        formatter
+            .debug_struct("DebugEventLog")
+            .finish_non_exhaustive()
     }
 }
 
@@ -238,7 +258,9 @@ where
         match request.version() {
             Version::HTTP_11 | Version::HTTP_2 => {}
             Version::HTTP_10 if !is_connect => {}
-            Version::HTTP_10 => return ResponseFuture::error(Error::new(ErrorKind::UnsupportedMethod)),
+            Version::HTTP_10 => {
+                return ResponseFuture::error(Error::new(ErrorKind::UnsupportedMethod))
+            }
             _ => return ResponseFuture::error(Error::new(ErrorKind::UnsupportedVersion)),
         }
 
@@ -246,7 +268,10 @@ where
             Ok(key) => key,
             Err(error) => {
                 debug_assert_eq!(error, normalize::Error::AbsoluteUriRequired);
-                return ResponseFuture::error(Error::with_source(ErrorKind::AbsoluteUriRequired, error));
+                return ResponseFuture::error(Error::with_source(
+                    ErrorKind::AbsoluteUriRequired,
+                    error,
+                ));
             }
         };
         let client = self.clone();
@@ -290,10 +315,15 @@ where
         mut request: Request<B>,
         key: PoolKey,
     ) -> Result<Response<Incoming>, TrySendError<B>> {
-        let mut pooled = self.connection_for(key).await.map_err(TrySendError::Final)?;
+        let mut pooled = self
+            .connection_for(key)
+            .await
+            .map_err(TrySendError::Final)?;
         if pooled.is_http1() {
             if request.version() == Version::HTTP_2 {
-                return Err(TrySendError::Final(Error::new(ErrorKind::UnsupportedVersion)));
+                return Err(TrySendError::Final(Error::new(
+                    ErrorKind::UnsupportedVersion,
+                )));
             }
             normalize::normalize_h1_request(&mut request, self.config.set_host);
         }
@@ -365,7 +395,10 @@ where
                     Err(CheckoutError::ClosedValue | CheckoutError::NoLongerWanted) => {
                         Err(ConnectionError::Retry)
                     }
-                    Err(error) => Err(ConnectionError::Final(Error::with_source(ErrorKind::Connect, error))),
+                    Err(error) => Err(ConnectionError::Final(Error::with_source(
+                        ErrorKind::Connect,
+                        error,
+                    ))),
                 }
             }
             Either::Left((Err(error), _)) => Err(ConnectionError::Final(Error::with_source(
@@ -387,7 +420,10 @@ where
             .ok_or_else(|| Error::new(ErrorKind::Canceled))?;
         let connected = match self
             .connector
-            .connect(normalize::pool_key_uri(key.clone()), self.config.protocol == PoolProtocol::Http2)
+            .connect(
+                normalize::pool_key_uri(key.clone()),
+                self.config.protocol == PoolProtocol::Http2,
+            )
             .await
         {
             Ok(connected) => connected,
@@ -408,7 +444,9 @@ where
             }
         }
 
-        if connected.protocol == ConnectionProtocol::Http2 && self.config.protocol != PoolProtocol::Http2 {
+        if connected.protocol == ConnectionProtocol::Http2
+            && self.config.protocol != PoolProtocol::Http2
+        {
             connecting = connecting
                 .alpn_h2(&self.pool)
                 .ok_or_else(|| Error::new(ErrorKind::Canceled))?;
@@ -720,7 +758,12 @@ impl Builder {
             #[cfg(feature = "http2")]
             h2_builder: self.h2_builder,
             debug_events: debug_events.clone(),
-            pool: pool::Pool::new(self.pool_config, self.executor, self.pool_timer, debug_events),
+            pool: pool::Pool::new(
+                self.pool_config,
+                self.executor,
+                self.pool_timer,
+                debug_events,
+            ),
         }
     }
 }

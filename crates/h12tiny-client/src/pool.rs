@@ -116,7 +116,10 @@ impl<T, K: Key> Pool<T, K> {
                 debug_events: debug_events.clone(),
             }))
         });
-        Self { inner, debug_events }
+        Self {
+            inner,
+            debug_events,
+        }
     }
 
     pub(crate) fn is_enabled(&self) -> bool {
@@ -199,7 +202,9 @@ impl<T: Poolable, K: Key> Pool<T, K> {
         let pool = if value.can_share() {
             WeakOpt::none()
         } else {
-            self.inner.as_ref().map_or_else(WeakOpt::none, WeakOpt::downgrade)
+            self.inner
+                .as_ref()
+                .map_or_else(WeakOpt::none, WeakOpt::downgrade)
         };
         Pooled {
             value: Some(value),
@@ -268,7 +273,9 @@ impl<T: Poolable, K: Key> IdlePopper<'_, T, K> {
 
 impl<T: Poolable, K: Key> Inner<T, K> {
     fn now(&self) -> Instant {
-        self.timer.as_ref().map_or_else(Instant::now, |timer| timer.now())
+        self.timer
+            .as_ref()
+            .map_or_else(Instant::now, |timer| timer.now())
     }
 
     fn put(&mut self, key: K, value: T, pool: &Arc<Mutex<Self>>) -> bool {
@@ -480,7 +487,10 @@ impl fmt::Display for CheckoutError {
 impl std::error::Error for CheckoutError {}
 
 impl<T: Poolable, K: Key> Checkout<T, K> {
-    fn poll_waiter(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Pooled<T, K>, CheckoutError>>> {
+    fn poll_waiter(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Pooled<T, K>, CheckoutError>>> {
         let Some(mut receiver) = self.waiter.take() else {
             return Poll::Ready(None);
         };
@@ -512,13 +522,18 @@ impl<T: Poolable, K: Key> Checkout<T, K> {
                 .pop(expiration, now, debug_events.as_ref());
                 entry.map(|entry| (entry, entries.is_empty()))
             });
-            let (entry, remove) = maybe_entry.map_or((None, true), |(entry, empty)| (Some(entry), empty));
+            let (entry, remove) =
+                maybe_entry.map_or((None, true), |(entry, empty)| (Some(entry), empty));
             if remove {
                 inner.idle.remove(&self.key);
             }
             if entry.is_none() && self.waiter.is_none() {
                 let (sender, mut receiver) = oneshot::channel();
-                inner.waiters.entry(self.key.clone()).or_default().push_back(sender);
+                inner
+                    .waiters
+                    .entry(self.key.clone())
+                    .or_default()
+                    .push_back(sender);
                 assert!(Pin::new(&mut receiver).poll(cx).is_pending());
                 self.waiter = Some(receiver);
             }
@@ -647,7 +662,9 @@ mod tests {
 
     use futures_lite::future::block_on;
 
-    use super::{Checkout, CheckoutError, Config, Connecting, Pool, Poolable, Protocol, Reservation, WeakOpt};
+    use super::{
+        Checkout, CheckoutError, Config, Connecting, Pool, Poolable, Protocol, Reservation, WeakOpt,
+    };
     use h12tiny_core::runtime::{AsyncIoTimer, BoxExecutor, BoxSendFuture};
 
     #[derive(Debug, PartialEq, Eq)]
@@ -724,7 +741,9 @@ mod tests {
         }
     }
 
-    fn poll_once<T: Poolable>(checkout: &mut Checkout<T, String>) -> Poll<Result<super::Pooled<T, String>, CheckoutError>> {
+    fn poll_once<T: Poolable>(
+        checkout: &mut Checkout<T, String>,
+    ) -> Poll<Result<super::Pooled<T, String>, CheckoutError>> {
         let mut cx = Context::from_waker(Waker::noop());
         Pin::new(checkout).poll(&mut cx)
     }
@@ -759,7 +778,14 @@ mod tests {
             1
         );
         drop(checkout);
-        assert!(!pool.inner.as_ref().unwrap().lock().unwrap().waiters.contains_key(&key));
+        assert!(!pool
+            .inner
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .waiters
+            .contains_key(&key));
     }
 
     #[test]
@@ -830,7 +856,14 @@ mod tests {
             },
             Closed,
         ));
-        assert!(!pool.inner.as_ref().unwrap().lock().unwrap().idle.contains_key(&key));
+        assert!(!pool
+            .inner
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .idle
+            .contains_key(&key));
     }
 
     #[test]
@@ -849,7 +882,14 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         let mut checkout = pool.checkout(key.clone());
         assert!(poll_once(&mut checkout).is_pending());
-        assert!(!pool.inner.as_ref().unwrap().lock().unwrap().idle.contains_key(&key));
+        assert!(!pool
+            .inner
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .idle
+            .contains_key(&key));
     }
 
     #[test]
@@ -866,13 +906,27 @@ mod tests {
             );
             let key = "example.test".to_owned();
             drop(pool.pooled(connecting(key.clone()), Unique(7)));
-            assert!(pool.inner.as_ref().unwrap().lock().unwrap().idle.contains_key(&key));
+            assert!(pool
+                .inner
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .idle
+                .contains_key(&key));
 
             // The recurring task intentionally uses a conservative 90 ms
             // minimum interval to avoid a busy timer for tiny user-supplied
             // values. No checkout is performed after this wait.
             async_io::Timer::after(Duration::from_millis(120)).await;
-            assert!(!pool.inner.as_ref().unwrap().lock().unwrap().idle.contains_key(&key));
+            assert!(!pool
+                .inner
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .idle
+                .contains_key(&key));
         });
     }
 

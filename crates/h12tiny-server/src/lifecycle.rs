@@ -206,10 +206,8 @@ impl<L, S> TlsServe<L, S> {
 impl<L, S, B> Serve<L, S>
 where
     L: Listener + Send + Sync + 'static,
-    S: Service<
-            http::Request<hyper::body::Incoming>,
-            Response = http::Response<B>,
-        > + Clone
+    S: Service<http::Request<hyper::body::Incoming>, Response = http::Response<B>>
+        + Clone
         + Send
         + 'static,
     S::Future: Send + 'static,
@@ -232,10 +230,8 @@ where
 impl<L, S, B> TlsServe<L, S>
 where
     L: Listener + Send + Sync + 'static,
-    S: Service<
-            http::Request<hyper::body::Incoming>,
-            Response = http::Response<B>,
-        > + Clone
+    S: Service<http::Request<hyper::body::Incoming>, Response = http::Response<B>>
+        + Clone
         + Send
         + 'static,
     S::Future: Send + 'static,
@@ -289,10 +285,8 @@ async fn drain_active(active: &mut Vec<Active>) {
 async fn run<L, S, B, F>(server: Serve<L, S>, shutdown: F) -> io::Result<()>
 where
     L: Listener + Send + Sync + 'static,
-    S: Service<
-            http::Request<hyper::body::Incoming>,
-            Response = http::Response<B>,
-        > + Clone
+    S: Service<http::Request<hyper::body::Incoming>, Response = http::Response<B>>
+        + Clone
         + Send
         + 'static,
     S::Future: Send + 'static,
@@ -405,10 +399,8 @@ where
 async fn run_tls<L, S, B, F>(server: TlsServe<L, S>, shutdown: F) -> io::Result<()>
 where
     L: Listener + Send + Sync + 'static,
-    S: Service<
-            http::Request<hyper::body::Incoming>,
-            Response = http::Response<B>,
-        > + Clone
+    S: Service<http::Request<hyper::body::Incoming>, Response = http::Response<B>>
+        + Clone
         + Send
         + 'static,
     S::Future: Send + 'static,
@@ -543,10 +535,10 @@ mod tests {
     use futures_channel::oneshot;
     use futures_lite::prelude::*;
     use h12tiny_core::runtime::{BoxExecutor, BoxSendFuture};
+    use http::{Request, Response};
     use http_body::{Body, Frame, SizeHint};
     use hyper::body::Incoming;
     use hyper::service::Service;
-    use http::{Request, Response};
     use std::future::Future;
     use std::io;
     use std::pin::Pin;
@@ -633,7 +625,10 @@ mod tests {
                 assert!(count > 0, "server closed before response headers");
                 response.extend_from_slice(&buffer[..count]);
             }
-            assert!(response.starts_with(b"HTTP/1.1 200"), "response: {response:?}");
+            assert!(
+                response.starts_with(b"HTTP/1.1 200"),
+                "response: {response:?}"
+            );
             shutdown_tx.send(()).expect("signal shutdown");
         });
 

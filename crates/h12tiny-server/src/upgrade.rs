@@ -23,11 +23,11 @@ mod tests {
     use futures_lite::prelude::*;
     use h12tiny_core::io::FuturesIo;
     use h12tiny_core::runtime::{BoxExecutor, BoxSendFuture};
+    use http::{Request, Response};
     use http_body::{Body, Frame, SizeHint};
     use hyper::body::Incoming;
     use hyper::rt::{Read, ReadBuf, Write};
     use hyper::service::Service;
-    use http::{Request, Response};
     use std::convert::Infallible;
     use std::future::Future;
     use std::pin::Pin;
@@ -126,10 +126,8 @@ mod tests {
                     let (stream, _) = listener.accept().await.expect("accept test stream");
                     let builder = crate::conn::auto::Builder::new(BoxExecutor::new(TestExecutor))
                         .http1_only();
-                    let connection = builder.serve_connection(
-                        FuturesIo::new(stream),
-                        UpgradeService,
-                    );
+                    let connection =
+                        builder.serve_connection(FuturesIo::new(stream), UpgradeService);
                     connection.await.expect("serve upgraded connection");
                 });
             });
@@ -150,18 +148,25 @@ mod tests {
             let mut received = Vec::new();
             let mut buffer = [0u8; 128];
             for _ in 0..32 {
-                let count = client.read(&mut buffer).await.expect("read upgrade response");
+                let count = client
+                    .read(&mut buffer)
+                    .await
+                    .expect("read upgrade response");
                 if count == 0 {
                     break;
                 }
                 received.extend_from_slice(&buffer[..count]);
-                if received.windows(b"echo-payload".len()).any(|window| {
-                    window == b"echo-payload"
-                }) {
+                if received
+                    .windows(b"echo-payload".len())
+                    .any(|window| window == b"echo-payload")
+                {
                     break;
                 }
             }
-            assert!(received.starts_with(b"HTTP/1.1 101"), "response: {received:?}");
+            assert!(
+                received.starts_with(b"HTTP/1.1 101"),
+                "response: {received:?}"
+            );
             assert!(received
                 .windows(b"echo-payload".len())
                 .any(|window| window == b"echo-payload"));

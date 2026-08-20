@@ -15,9 +15,6 @@ pub mod upgrade;
 /// Runtime-neutral listener and graceful-drain helpers.
 pub mod lifecycle;
 
-pub use lifecycle::{serve, ConnectionError, Listener};
-#[cfg(feature = "tls")]
-pub use lifecycle::{serve_tls, TlsServe};
 /// TLS acceptor used by [`serve_tls`].
 ///
 /// Reexporting this boundary keeps applications on h12tiny's selected
@@ -25,3 +22,6 @@ pub use lifecycle::{serve_tls, TlsServe};
 /// to adapt an already-configured `rustls::ServerConfig`.
 #[cfg(feature = "tls")]
 pub use futures_rustls::TlsAcceptor;
+pub use lifecycle::{serve, ConnectionError, Listener};
+#[cfg(feature = "tls")]
+pub use lifecycle::{serve_tls, TlsServe};

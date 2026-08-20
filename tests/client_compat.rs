@@ -134,9 +134,7 @@ fn boxed_response(bytes: impl Into<Bytes>) -> Response<BoxBody> {
     Response::new(boxed_bytes(bytes))
 }
 
-async fn spawn_plaintext_server(
-    service: CompatService,
-) -> (std::net::SocketAddr, smol::Task<()>) {
+async fn spawn_plaintext_server(service: CompatService) -> (std::net::SocketAddr, smol::Task<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = smol::spawn(async move {
@@ -198,17 +196,13 @@ fn json_request_bounded_response_and_application_bearer_retry() {
         // consumed before the application recreates the request with a token.
         let first = client.request(initial.build()).await.unwrap();
         assert_eq!(first.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            first.headers()[WWW_AUTHENTICATE],
-            "Bearer realm=\"compat\""
-        );
+        assert_eq!(first.headers()[WWW_AUTHENTICATE], "Bearer realm=\"compat\"");
         first.bytes_limited(128).await.unwrap();
 
         let mut authenticated_template = initial.template().clone();
-        authenticated_template.headers_mut().insert(
-            AUTHORIZATION,
-            util::bearer("test-token").unwrap(),
-        );
+        authenticated_template
+            .headers_mut()
+            .insert(AUTHORIZATION, util::bearer("test-token").unwrap());
         let authenticated = ReplayableRequest::new(authenticated_template, factory);
         let response = client.request(authenticated.build()).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -221,7 +215,10 @@ fn json_request_bounded_response_and_application_bearer_retry() {
         assert_eq!(records[0].path, "/bearer-json");
         assert_eq!(records[0].authorization, None);
         assert_eq!(records[0].body, br#"["pull",1]"#);
-        assert_eq!(records[1].authorization.as_deref(), Some("Bearer test-token"));
+        assert_eq!(
+            records[1].authorization.as_deref(),
+            Some("Bearer test-token")
+        );
         assert_eq!(records[1].body, records[0].body);
 
         drop(client);
@@ -260,10 +257,9 @@ fn streaming_upload_requires_fresh_factory_and_is_not_implicitly_retried() {
         first.bytes_limited(128).await.unwrap();
 
         let mut authenticated_template = request_template(format!("http://{address}/upload"));
-        authenticated_template.headers_mut().insert(
-            AUTHORIZATION,
-            util::bearer("test-token").unwrap(),
-        );
+        authenticated_template
+            .headers_mut()
+            .insert(AUTHORIZATION, util::bearer("test-token").unwrap());
         let second = client
             .request(Request::from_parts(
                 authenticated_template.into_parts().0,
@@ -282,7 +278,10 @@ fn streaming_upload_requires_fresh_factory_and_is_not_implicitly_retried() {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].body, b"upload-stream");
         assert_eq!(records[1].body, b"upload-stream");
-        assert_eq!(records[1].authorization.as_deref(), Some("Bearer test-token"));
+        assert_eq!(
+            records[1].authorization.as_deref(),
+            Some("Bearer test-token")
+        );
 
         drop(client);
         drop(server);
@@ -293,10 +292,7 @@ fn streaming_upload_requires_fresh_factory_and_is_not_implicitly_retried() {
 fn streaming_download_writes_incrementally_to_application_sink() {
     smol::block_on(async {
         let state = Arc::new(CompatState::default());
-        let (address, server) = spawn_plaintext_server(CompatService {
-            state,
-        })
-        .await;
+        let (address, server) = spawn_plaintext_server(CompatService { state }).await;
         let client = Client::builder(SmolExecutor).build::<BoxBody>();
         let response = client
             .request(
@@ -314,16 +310,22 @@ fn streaming_download_writes_incrementally_to_application_sink() {
         let mut chunks = 0;
         while let Some(chunk) = data.next().await {
             let chunk = chunk.unwrap();
-            assert!(chunks < expected.len(), "download emitted an unexpected frame");
+            assert!(
+                chunks < expected.len(),
+                "download emitted an unexpected frame"
+            );
             assert_eq!(chunk.as_ref(), expected[chunks]);
             chunks += 1;
             sink_bytes += chunk.len();
-            sink_checksum = chunk
-                .iter()
-                .fold(sink_checksum, |sum, byte| sum.wrapping_add(u64::from(*byte)));
+            sink_checksum = chunk.iter().fold(sink_checksum, |sum, byte| {
+                sum.wrapping_add(u64::from(*byte))
+            });
         }
         assert!(chunks >= 3, "expected one sink write per response frame");
-        assert_eq!(sink_bytes, expected.iter().map(|chunk| chunk.len()).sum::<usize>());
+        assert_eq!(
+            sink_bytes,
+            expected.iter().map(|chunk| chunk.len()).sum::<usize>()
+        );
         assert_eq!(
             sink_checksum,
             expected
@@ -370,7 +372,10 @@ fn oversized_bounded_response_does_not_poison_the_next_pooled_request() {
             .await
             .unwrap();
         assert_eq!(healthy.status(), StatusCode::OK);
-        assert_eq!(healthy.bytes_limited(64).await.unwrap(), Bytes::from_static(b"healthy"));
+        assert_eq!(
+            healthy.bytes_limited(64).await.unwrap(),
+            Bytes::from_static(b"healthy")
+        );
 
         let records = recorded(&state);
         assert_eq!(records.len(), 2);
@@ -451,7 +456,10 @@ fn custom_rustls_config_uses_client_certificate_and_custom_root() {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.bytes_limited(64).await.unwrap(), Bytes::from_static(b"mtls-ok"));
+        assert_eq!(
+            response.bytes_limited(64).await.unwrap(),
+            Bytes::from_static(b"mtls-ok")
+        );
 
         drop(client);
         server.await;

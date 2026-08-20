@@ -30,10 +30,8 @@ impl Service<Request<Incoming>> for DrainService {
     fn call(&self, request: Request<Incoming>) -> Self::Future {
         Box::pin(async move {
             let mut body = request.into_body();
-            while let Some(frame) = futures_util::future::poll_fn(|cx| {
-                Pin::new(&mut body).poll_frame(cx)
-            })
-            .await
+            while let Some(frame) =
+                futures_util::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await
             {
                 if frame.is_err() {
                     return Err(io::Error::new(
@@ -119,7 +117,10 @@ fn hyper_h1_rejects_ambiguous_or_malformed_raw_framing() {
             ),
         ];
         for (name, bytes) in cases {
-            assert!(server_rejects(bytes).await, "Hyper accepted unsafe case {name}");
+            assert!(
+                server_rejects(bytes).await,
+                "Hyper accepted unsafe case {name}"
+            );
         }
     });
 }

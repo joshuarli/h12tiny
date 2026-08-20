@@ -237,7 +237,10 @@ impl Version {
 
 #[cfg(feature = "http2")]
 /// Executor boundary used by the HTTP/2 Hyper server connection.
-pub trait HttpServerConnExec<A, B: http_body::Body>: hyper::rt::bounds::Http2ServerConnExec<A, B> {}
+pub trait HttpServerConnExec<A, B: http_body::Body>:
+    hyper::rt::bounds::Http2ServerConnExec<A, B>
+{
+}
 
 #[cfg(feature = "http2")]
 impl<A, B: http_body::Body, T: hyper::rt::bounds::Http2ServerConnExec<A, B>>
@@ -380,9 +383,7 @@ impl<E> Builder<E> {
                 let conn = self.http1.serve_connection(io, service).with_upgrades();
                 #[cfg(not(feature = "upgrade"))]
                 let conn = self.http1.serve_connection(io, service);
-                ConnState::H1 {
-                    conn,
-                }
+                ConnState::H1 { conn }
             }
             #[cfg(feature = "http2")]
             Some(Version::H2) => {
@@ -415,14 +416,21 @@ impl<E> Builder<E> {
     ///
     /// The caller owns TLS acceptance (for example, by passing an
     /// `async_net::TcpStream` to `TlsAcceptor::accept`). This method applies
-/// [`h12tiny_core::io::FuturesIo`] after the handshake, preserving the low-level,
+    /// [`h12tiny_core::io::FuturesIo`] after the handshake, preserving the low-level,
     /// runtime-neutral server surface while making ALPN dispatch explicit.
     #[cfg(feature = "tls")]
     pub fn serve_tls_connection<I, S, B>(
         &self,
         io: futures_rustls::server::TlsStream<I>,
         service: S,
-    ) -> Result<Connection<'static, h12tiny_core::io::FuturesIo<futures_rustls::server::TlsStream<I>>, S, E>>
+    ) -> Result<
+        Connection<
+            'static,
+            h12tiny_core::io::FuturesIo<futures_rustls::server::TlsStream<I>>,
+            S,
+            E,
+        >,
+    >
     where
         E: Clone + HttpServerConnExec<S::Future, B>,
         S: hyper::service::Service<
@@ -603,10 +611,7 @@ where
 #[cfg(any(feature = "http1", feature = "http2"))]
 impl<I, S, E, B> Future for Connection<'_, I, S, E>
 where
-    S: hyper::service::Service<
-        http::Request<hyper::body::Incoming>,
-        Response = http::Response<B>,
-    >,
+    S: hyper::service::Service<http::Request<hyper::body::Incoming>, Response = http::Response<B>>,
     S::Future: 'static,
     S::Error: Into<Error>,
     B: http_body::Body + 'static,
@@ -626,7 +631,9 @@ where
                     service,
                 } => {
                     let (version, io) = ready!(read_version.poll(cx))?;
-                    let service = service.take().expect("service present until protocol choice");
+                    let service = service
+                        .take()
+                        .expect("service present until protocol choice");
                     match version {
                         #[cfg(feature = "http1")]
                         Version::H1 => {
@@ -654,15 +661,11 @@ where
                 #[cfg(feature = "http1")]
                 ConnStateProj::H1 { conn } => return conn.poll(cx).map_err(Into::into),
                 #[cfg(not(feature = "http1"))]
-                ConnStateProj::H1 { .. } => {
-                    return Poll::Ready(Err(Version::H1.unsupported()))
-                }
+                ConnStateProj::H1 { .. } => return Poll::Ready(Err(Version::H1.unsupported())),
                 #[cfg(feature = "http2")]
                 ConnStateProj::H2 { conn } => return conn.poll(cx).map_err(Into::into),
                 #[cfg(not(feature = "http2"))]
-                ConnStateProj::H2 { .. } => {
-                    return Poll::Ready(Err(Version::H2.unsupported()))
-                }
+                ConnStateProj::H2 { .. } => return Poll::Ready(Err(Version::H2.unsupported())),
                 ConnStateProj::Unsupported { error } => {
                     return Poll::Ready(Err(error.take().expect("unsupported error present")))
                 }
@@ -887,8 +890,10 @@ mod tests {
 
     #[test]
     fn rewind_preserves_partial_reads_and_delegates_writes() {
-        let mut rewind =
-            Rewind::new_buffered(Chunks::new(vec![&b"socket"[..]]), Bytes::from_static(b"prefix"));
+        let mut rewind = Rewind::new_buffered(
+            Chunks::new(vec![&b"socket"[..]]),
+            Bytes::from_static(b"prefix"),
+        );
         let mut bytes = [std::mem::MaybeUninit::<u8>::uninit(); 3];
         let mut read = hyper::rt::ReadBuf::uninit(&mut bytes);
         let waker = Waker::noop();

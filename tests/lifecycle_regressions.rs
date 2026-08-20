@@ -63,9 +63,9 @@ fn failed_h2_establishment_releases_multiple_waiters_for_later_success() {
             server_counters.tcp_opened();
             server_counters.h2_opened();
             replacement_accepted_tx.send(()).unwrap();
-            let _ = hyper::server::conn::http2::Builder::new(
-                h12tiny::runtime::BoxExecutor::new(SmolExecutor),
-            )
+            let _ = hyper::server::conn::http2::Builder::new(h12tiny::runtime::BoxExecutor::new(
+                SmolExecutor,
+            ))
             .serve_connection(
                 h12tiny::io::FuturesIo::new(second),
                 H2Service {
@@ -83,12 +83,14 @@ fn failed_h2_establishment_releases_multiple_waiters_for_later_success() {
 
         let mut requests = Vec::new();
         for path in ["/one", "/two", "/three"] {
-            requests.push(smol::spawn(client.clone().request(
-                Request::builder()
-                    .uri(format!("http://{address}{path}"))
-                    .body(FullBody::empty())
-                    .unwrap(),
-            )));
+            requests.push(smol::spawn(
+                client.clone().request(
+                    Request::builder()
+                        .uri(format!("http://{address}{path}"))
+                        .body(FullBody::empty())
+                        .unwrap(),
+                ),
+            ));
         }
 
         accepted_rx.await.unwrap();
@@ -128,7 +130,12 @@ fn failed_h2_establishment_releases_multiple_waiters_for_later_success() {
             // its request. Every waiter parked behind that owner must instead
             // be released to retry on the replacement H2 session.
             assert_eq!(owner_failures, 1, "events before failure: {observed:?}");
-            assert_eq!(waiter_successes, 2, "counters: {:?}", request_counters.snapshot());
+            assert_eq!(
+                waiter_successes,
+                2,
+                "counters: {:?}",
+                request_counters.snapshot()
+            );
         };
         match future::select(
             Box::pin(all_requests),
@@ -287,7 +294,9 @@ fn stale_idle_h1_socket_is_evicted_before_or_during_next_dispatch() {
         drop(replacement);
 
         let request = replacement_rx.await.unwrap();
-        assert!(String::from_utf8(request).unwrap().starts_with("GET /replacement HTTP/1.1"));
+        assert!(String::from_utf8(request)
+            .unwrap()
+            .starts_with("GET /replacement HTTP/1.1"));
 
         drop(client);
         server.await;

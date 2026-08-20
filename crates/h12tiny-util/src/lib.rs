@@ -200,7 +200,9 @@ where
 }
 
 /// Alias for [`reader_body`].
-pub fn body_from_reader<R>(reader: R) -> StreamBody<impl Stream<Item = Result<Frame<Bytes>, io::Error>>>
+pub fn body_from_reader<R>(
+    reader: R,
+) -> StreamBody<impl Stream<Item = Result<Frame<Bytes>, io::Error>>>
 where
     R: AsyncRead + Unpin,
 {
@@ -685,9 +687,9 @@ pub use json::{json_body, json_response};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::convert::Infallible;
     use futures_lite::future::block_on;
     use futures_util::stream;
+    use std::convert::Infallible;
 
     #[test]
     fn constructors_and_data_stream_preserve_chunks() {
@@ -730,12 +732,15 @@ mod tests {
 
     #[test]
     fn idle_timeout_resets_after_each_frame() {
-        let body = frame_stream_body(stream::iter(vec![
-            Ok::<_, Infallible>(Frame::data(Bytes::from_static(b"frame"))),
-        ]))
+        let body = frame_stream_body(stream::iter(vec![Ok::<_, Infallible>(Frame::data(
+            Bytes::from_static(b"frame"),
+        ))]))
         .with_idle_timeout(Duration::from_millis(100));
         let mut data = body.into_data_stream();
-        assert_eq!(block_on(data.next()).unwrap().unwrap(), Bytes::from_static(b"frame"));
+        assert_eq!(
+            block_on(data.next()).unwrap().unwrap(),
+            Bytes::from_static(b"frame")
+        );
         assert!(block_on(data.next()).is_none());
     }
 
@@ -752,7 +757,10 @@ mod tests {
     #[test]
     fn json_body_and_bounded_decode_set_media_type() {
         let response = json_response(&serde_json::json!({ "ok": true })).unwrap();
-        assert_eq!(response.headers()[http::header::CONTENT_TYPE], "application/json");
+        assert_eq!(
+            response.headers()[http::header::CONTENT_TYPE],
+            "application/json"
+        );
         let decoded: serde_json::Value = block_on(response.json_limited(64)).unwrap();
         assert_eq!(decoded["ok"], true);
     }

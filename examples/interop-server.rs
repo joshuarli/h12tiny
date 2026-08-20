@@ -25,7 +25,8 @@ use support::benchmark::{BenchmarkService, SmolExecutor};
 fn tls_config() -> rustls::ServerConfig {
     use futures_rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
-    let certificate = CertificateDer::from(include_bytes!("../tests/fixtures/tls/cert.der").to_vec());
+    let certificate =
+        CertificateDer::from(include_bytes!("../tests/fixtures/tls/cert.der").to_vec());
     let key = PrivateKeyDer::try_from(include_bytes!("../tests/fixtures/tls/key.der").to_vec())
         .expect("the committed TLS fixture key must be PKCS#8 DER");
     let mut config = rustls::ServerConfig::builder()
@@ -65,15 +66,14 @@ async fn serve_tls(listener: TcpListener, executor: BoxExecutor, acceptor: TlsAc
                     return;
                 }
             };
-            let connection = match auto::Builder::new(executor)
-                .serve_tls_connection(tls, BenchmarkService)
-            {
-                Ok(connection) => connection,
-                Err(error) => {
-                    eprintln!("TLS protocol selection for {peer} failed: {error}");
-                    return;
-                }
-            };
+            let connection =
+                match auto::Builder::new(executor).serve_tls_connection(tls, BenchmarkService) {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        eprintln!("TLS protocol selection for {peer} failed: {error}");
+                        return;
+                    }
+                };
             if let Err(error) = connection.await {
                 eprintln!("TLS connection {peer} ended with error: {error}");
             }
@@ -131,12 +131,18 @@ fn main() {
         let mut listeners = Vec::new();
         if let Some(address) = options.plain {
             let listener = TcpListener::bind(&address).await?;
-            eprintln!("h12tiny plaintext server listening on http://{}", listener.local_addr()?);
+            eprintln!(
+                "h12tiny plaintext server listening on http://{}",
+                listener.local_addr()?
+            );
             listeners.push(smol::spawn(serve_plain(listener, executor.clone())));
         }
         if let Some(address) = options.tls {
             let listener = TcpListener::bind(&address).await?;
-            eprintln!("h12tiny TLS server listening on https://{}", listener.local_addr()?);
+            eprintln!(
+                "h12tiny TLS server listening on https://{}",
+                listener.local_addr()?
+            );
             let acceptor = TlsAcceptor::from(Arc::new(tls_config()));
             listeners.push(smol::spawn(serve_tls(listener, executor, acceptor)));
         }

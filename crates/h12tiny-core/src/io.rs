@@ -150,10 +150,7 @@ where
         futures_io::AsyncWrite::poll_write(inner.as_mut(), cx, buf)
     }
 
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let mut inner = unsafe {
             // SAFETY: The wrapped field is structurally pinned and is not
             // moved while this pinned projection is alive.
@@ -162,10 +159,7 @@ where
         futures_io::AsyncWrite::poll_flush(inner.as_mut(), cx)
     }
 
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let mut inner = unsafe {
             // SAFETY: The wrapped field is structurally pinned and is not
             // moved while this pinned projection is alive.
@@ -256,10 +250,7 @@ where
         hyper::rt::Write::poll_write_vectored(inner.as_mut(), cx, bufs)
     }
 
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let mut inner = unsafe {
             // SAFETY: see the corresponding `AsyncRead` projection.
             self.map_unchecked_mut(|this| &mut this.0)
@@ -267,10 +258,7 @@ where
         hyper::rt::Write::poll_flush(inner.as_mut(), cx)
     }
 
-    fn poll_close(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let mut inner = unsafe {
             // SAFETY: see the corresponding `AsyncRead` projection.
             self.map_unchecked_mut(|this| &mut this.0)
@@ -351,18 +339,12 @@ mod tests {
             Poll::Ready(Ok(n))
         }
 
-        fn poll_flush(
-            mut self: Pin<&mut Self>,
-            _: &mut Context<'_>,
-        ) -> Poll<io::Result<()>> {
+        fn poll_flush(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
             self.flushed = true;
             Poll::Ready(Ok(()))
         }
 
-        fn poll_close(
-            mut self: Pin<&mut Self>,
-            _: &mut Context<'_>,
-        ) -> Poll<io::Result<()>> {
+        fn poll_close(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
             self.closed = true;
             Poll::Ready(Ok(()))
         }
@@ -484,10 +466,7 @@ mod tests {
                 Poll::Ready(Ok(buf.len()))
             }
 
-            fn poll_flush(
-                self: Pin<&mut Self>,
-                _: &mut Context<'_>,
-            ) -> Poll<io::Result<()>> {
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
                 Poll::Ready(Ok(()))
             }
 

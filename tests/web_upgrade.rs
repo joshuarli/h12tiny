@@ -100,12 +100,20 @@ fn web_http_upgrade_composes_with_the_raw_server_upgrade() {
                 break;
             }
             received.extend_from_slice(&buffer[..count]);
-            if received.windows(b"web-echo".len()).any(|window| window == b"web-echo") {
+            if received
+                .windows(b"web-echo".len())
+                .any(|window| window == b"web-echo")
+            {
                 break;
             }
         }
-        assert!(received.starts_with(b"HTTP/1.1 101"), "response: {received:?}");
-        assert!(received.windows(b"web-echo".len()).any(|window| window == b"web-echo"));
+        assert!(
+            received.starts_with(b"HTTP/1.1 101"),
+            "response: {received:?}"
+        );
+        assert!(received
+            .windows(b"web-echo".len())
+            .any(|window| window == b"web-echo"));
     });
 
     server.join().unwrap();

@@ -96,7 +96,10 @@ fn web_route_composes_with_the_futures_lite_websocket_parser() {
             .await
             .unwrap();
         let response = read_response_headers(&mut client).await;
-        assert!(response.starts_with(b"HTTP/1.1 101"), "response: {response:?}");
+        assert!(
+            response.starts_with(b"HTTP/1.1 101"),
+            "response: {response:?}"
+        );
         assert!(
             response
                 .windows(b"sec-websocket-accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=".len())

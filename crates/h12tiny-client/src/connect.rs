@@ -116,9 +116,13 @@ impl fmt::Display for Error {
             #[cfg(feature = "tls")]
             Self::InvalidServerName(host) => write!(f, "invalid TLS server name {host:?}"),
             #[cfg(feature = "tls")]
-            Self::UnexpectedAlpn(protocol) => write!(f, "server selected unsupported ALPN {protocol:?}"),
+            Self::UnexpectedAlpn(protocol) => {
+                write!(f, "server selected unsupported ALPN {protocol:?}")
+            }
             #[cfg(feature = "tls")]
-            Self::RequiredHttp2NotNegotiated => f.write_str("HTTP/2 was required but ALPN did not select h2"),
+            Self::RequiredHttp2NotNegotiated => {
+                f.write_str("HTTP/2 was required but ALPN did not select h2")
+            }
             Self::Connect(error) => error.fmt(f),
             Self::Custom(error) => error.fmt(f),
             Self::Timeout => f.write_str("connection establishment timed out"),
@@ -150,7 +154,9 @@ impl Error {
             Self::InvalidServerName(_) | Self::Tls(_) => super::ErrorKind::Tls,
             #[cfg(not(feature = "tls"))]
             Self::TlsDisabled => super::ErrorKind::Tls,
-            Self::MissingHost | Self::Connect(_) | Self::Custom(_) | Self::Timeout => super::ErrorKind::Connect,
+            Self::MissingHost | Self::Connect(_) | Self::Custom(_) | Self::Timeout => {
+                super::ErrorKind::Connect
+            }
         }
     }
 }
@@ -244,7 +250,11 @@ impl Connector {
         }
     }
 
-    async fn connect_without_timeout(&self, uri: Uri, require_h2: bool) -> Result<Connected, Error> {
+    async fn connect_without_timeout(
+        &self,
+        uri: Uri,
+        require_h2: bool,
+    ) -> Result<Connected, Error> {
         if let ConnectorKind::Custom(dialer) = &self.kind {
             return dialer.connect(uri, require_h2).await.map_err(Error::Custom);
         }
@@ -257,7 +267,9 @@ impl Connector {
             .and_then(|host| host.strip_suffix(']'))
             .unwrap_or_else(|| uri.host().expect("host was checked above"))
             .to_owned();
-        let scheme = uri.scheme_str().ok_or_else(|| Error::UnsupportedScheme("".to_owned()))?;
+        let scheme = uri
+            .scheme_str()
+            .ok_or_else(|| Error::UnsupportedScheme("".to_owned()))?;
         match scheme {
             "http" => {
                 let stream = connect_tcp(&host, uri.port_u16().unwrap_or(80))
@@ -272,7 +284,10 @@ impl Connector {
                     },
                 })
             }
-            "https" => self.connect_tls(host, uri.port_u16().unwrap_or(443), require_h2).await,
+            "https" => {
+                self.connect_tls(host, uri.port_u16().unwrap_or(443), require_h2)
+                    .await
+            }
             other => Err(Error::UnsupportedScheme(other.to_owned())),
         }
     }
@@ -287,7 +302,11 @@ impl Connector {
         let stream = connect_tcp(&host, port).await.map_err(Error::Connect)?;
         let server_name = futures_rustls::pki_types::ServerName::try_from(host.clone())
             .map_err(|_| Error::InvalidServerName(host))?;
-        let tls = self.tls.connect(server_name, stream).await.map_err(Error::Tls)?;
+        let tls = self
+            .tls
+            .connect(server_name, stream)
+            .await
+            .map_err(Error::Tls)?;
         let protocol = match tls.get_ref().1.alpn_protocol() {
             Some(b"h2") => super::ConnectionProtocol::Http2,
             Some(b"http/1.1") | None if !require_h2 => super::ConnectionProtocol::Http1,
@@ -301,12 +320,7 @@ impl Connector {
     }
 
     #[cfg(not(feature = "tls"))]
-    async fn connect_tls(
-        &self,
-        _: String,
-        _: u16,
-        _: bool,
-    ) -> Result<Connected, Error> {
+    async fn connect_tls(&self, _: String, _: u16, _: bool) -> Result<Connected, Error> {
         Err(Error::TlsDisabled)
     }
 }
@@ -427,7 +441,8 @@ mod tests {
     fn custom_dialer_receives_the_normalized_origin_and_protocol_requirement() {
         let dialer = RecordingDialer::default();
         let connector = Connector::with_dialer(dialer.clone());
-        let result = smol::block_on(connector.connect("http://example.test:8080/".parse().unwrap(), true));
+        let result =
+            smol::block_on(connector.connect("http://example.test:8080/".parse().unwrap(), true));
         assert!(matches!(result, Err(Error::Custom(_))));
         assert_eq!(
             *dialer.0.lock().unwrap(),
@@ -441,7 +456,8 @@ mod tests {
             .dialer(PendingDialer)
             .connect_timeout(Duration::ZERO)
             .build();
-        let result = smol::block_on(connector.connect("http://example.test/".parse().unwrap(), false));
+        let result =
+            smol::block_on(connector.connect("http://example.test/".parse().unwrap(), false));
         assert!(matches!(result, Err(Error::Timeout)));
     }
 
@@ -450,10 +466,9 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let connector = Connector::new();
-        let connected = smol::block_on(connector.connect(
-            format!("http://127.0.0.1:{port}/").parse().unwrap(),
-            false,
-        ))
+        let connected = smol::block_on(
+            connector.connect(format!("http://127.0.0.1:{port}/").parse().unwrap(), false),
+        )
         .unwrap();
 
         assert_eq!(connected.protocol, super::super::ConnectionProtocol::Http1);

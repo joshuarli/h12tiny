@@ -37,7 +37,11 @@ impl Service<Request<Incoming>> for DelayService {
             if slow {
                 async_io::Timer::after(Duration::from_millis(100)).await;
             }
-            Ok(Response::new(FullBody::from_static(if slow { b"slow" } else { b"fast" })))
+            Ok(Response::new(FullBody::from_static(if slow {
+                b"slow"
+            } else {
+                b"fast"
+            })))
         })
     }
 }
@@ -78,12 +82,14 @@ fn cancelling_one_h2_response_future_does_not_poison_the_shared_session() {
             .unwrap();
         assert_eq!(collect(warm.into_body()).await, b"fast");
 
-        let slow = smol::spawn(client.clone().request(
-            Request::builder()
-                .uri(format!("http://{address}/slow"))
-                .body(FullBody::empty())
-                .unwrap(),
-        ));
+        let slow = smol::spawn(
+            client.clone().request(
+                Request::builder()
+                    .uri(format!("http://{address}/slow"))
+                    .body(FullBody::empty())
+                    .unwrap(),
+            ),
+        );
         for _ in 0..100 {
             if counters.snapshot().logical_requests >= 2 {
                 break;

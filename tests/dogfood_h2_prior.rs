@@ -3,7 +3,10 @@
 use std::convert::Infallible;
 use std::future::{ready, Ready};
 use std::pin::Pin;
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use std::task::{Context, Poll};
 use std::time::Duration;
 

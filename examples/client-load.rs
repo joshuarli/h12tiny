@@ -198,7 +198,8 @@ fn expected_body_len(uri: &Uri) -> Option<usize> {
 
 async fn body_len(mut body: Incoming) -> Result<usize, String> {
     let mut length = 0;
-    while let Some(frame) = futures_util::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await
+    while let Some(frame) =
+        futures_util::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await
     {
         let frame = frame.map_err(|error| error.to_string())?;
         if let Ok(data) = frame.into_data() {
@@ -221,7 +222,7 @@ async fn one_request(
         .map_err(|error| format!("{} ({:?})", error, error.kind()))?;
     let version = response.version();
     let length = body_len(response.into_body()).await?;
-    let body_ok = expected.map_or(true, |expected| expected == length);
+    let body_ok = expected.is_none_or(|expected| expected == length);
     Ok((version, body_ok))
 }
 
@@ -296,7 +297,10 @@ fn main() {
         println!("logical_concurrency={}", options.concurrency);
         println!("peak_concurrency={}", concurrency.peak());
         println!("elapsed_seconds={seconds:.6}");
-        println!("requests_per_second={:.3}", options.requests as f64 / seconds);
+        println!(
+            "requests_per_second={:.3}",
+            options.requests as f64 / seconds
+        );
         println!("ok={}", options.requests - errors - body_mismatches);
         println!("errors={errors}");
         println!("body_mismatches={body_mismatches}");

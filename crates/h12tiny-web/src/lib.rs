@@ -20,9 +20,9 @@ use std::time::Duration;
 pub use bytes::Bytes;
 use futures_util::future::{select, Either};
 pub use http::header::{HeaderMap, HeaderValue};
-use http::header::{ALLOW, CONTENT_TYPE};
 #[cfg(feature = "cors")]
 use http::header::{HeaderName, ORIGIN};
+use http::header::{ALLOW, CONTENT_TYPE};
 pub use http::{Method, StatusCode, Version};
 use http::{Request as HttpRequest, Response as HttpResponse};
 use http_body::{Body, Frame, SizeHint};
@@ -37,8 +37,7 @@ use fastwebsockets::{after_handshake_split, FragmentCollectorRead, Role, WebSock
 /// WebSocket frame types exposed by the optional RFC 6455 adapter.
 #[cfg(feature = "websocket")]
 pub use fastwebsockets::{
-    Frame as WebSocketFrame, OpCode as WebSocketOpCode, Payload as WebSocketPayload,
-    WebSocketError,
+    Frame as WebSocketFrame, OpCode as WebSocketOpCode, Payload as WebSocketPayload, WebSocketError,
 };
 #[cfg(feature = "websocket")]
 use h12tiny_core::io::HyperIo;
@@ -61,9 +60,8 @@ pub type Response<B = ResponseBody> = HttpResponse<B>;
 /// A boxed handler future.
 pub type HandlerFuture = Pin<Box<dyn Future<Output = Response> + Send>>;
 
-type ServiceFuture = Pin<
-    Box<dyn Future<Output = Result<Response, std::convert::Infallible>> + Send>,
->;
+type ServiceFuture =
+    Pin<Box<dyn Future<Output = Result<Response, std::convert::Infallible>> + Send>>;
 
 /// Route parameters copied out of `matchit` so they can outlive the match.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -79,7 +77,9 @@ impl RouteParams {
 
     /// Iterate over parameters in route declaration order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.0.iter().map(|(key, value)| (key.as_str(), value.as_str()))
+        self.0
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
     }
 
     fn values(&self) -> impl Iterator<Item = &str> {
@@ -438,9 +438,12 @@ where
     ) -> Pin<Box<dyn Future<Output = Result<(Self, Request), Self::Rejection>> + Send>> {
         let state = state.clone();
         Box::pin(async move {
-            state
-                .map(|state| (Self(state), request))
-                .ok_or_else(|| Rejection::new(StatusCode::INTERNAL_SERVER_ERROR, "router state is not configured"))
+            state.map(|state| (Self(state), request)).ok_or_else(|| {
+                Rejection::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "router state is not configured",
+                )
+            })
         })
     }
 }
@@ -476,7 +479,10 @@ where
         Box::pin(async move {
             let (parts, body) = split_request(request);
             let value = parts.extensions.get::<T>().cloned().ok_or_else(|| {
-                Rejection::new(StatusCode::INTERNAL_SERVER_ERROR, "request extension is missing")
+                Rejection::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "request extension is missing",
+                )
             })?;
             Ok((Self(value), Request::from_parts(parts, body)))
         })
@@ -526,9 +532,15 @@ where
                 Ok(bytes) => Ok((bytes, Request::from_parts(parts, empty_body()))),
                 Err(error) => {
                     if let Some(error) = body_limit_from_collection(&error) {
-                        Err(Rejection::new(StatusCode::PAYLOAD_TOO_LARGE, error.to_string()))
+                        Err(Rejection::new(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            error.to_string(),
+                        ))
                     } else {
-                        Err(Rejection::new(StatusCode::BAD_REQUEST, "failed to read request body"))
+                        Err(Rejection::new(
+                            StatusCode::BAD_REQUEST,
+                            "failed to read request body",
+                        ))
                     }
                 }
             }
@@ -580,7 +592,10 @@ impl PathValue for String {
         let mut values = params.values();
         match (values.next(), values.next()) {
             (Some(value), None) => Ok(value.to_owned()),
-            _ => Err(Rejection::new(StatusCode::BAD_REQUEST, "expected one path parameter")),
+            _ => Err(Rejection::new(
+                StatusCode::BAD_REQUEST,
+                "expected one path parameter",
+            )),
         }
     }
 }
@@ -627,14 +642,17 @@ where
 {
     fn from_path(params: &RouteParams) -> Result<Self, Rejection> {
         let mut values = params.values();
-        let first = values
-            .next()
-            .ok_or_else(|| Rejection::new(StatusCode::BAD_REQUEST, "missing first path parameter"))?;
-        let second = values
-            .next()
-            .ok_or_else(|| Rejection::new(StatusCode::BAD_REQUEST, "missing second path parameter"))?;
+        let first = values.next().ok_or_else(|| {
+            Rejection::new(StatusCode::BAD_REQUEST, "missing first path parameter")
+        })?;
+        let second = values.next().ok_or_else(|| {
+            Rejection::new(StatusCode::BAD_REQUEST, "missing second path parameter")
+        })?;
         if values.next().is_some() {
-            return Err(Rejection::new(StatusCode::BAD_REQUEST, "too many path parameters"));
+            return Err(Rejection::new(
+                StatusCode::BAD_REQUEST,
+                "too many path parameters",
+            ));
         }
         Ok((A::parse_scalar(first)?, B::parse_scalar(second)?))
     }
@@ -649,7 +667,10 @@ where
     fn from_path(params: &RouteParams) -> Result<Self, Rejection> {
         let values: Vec<_> = params.values().collect();
         if values.len() != 3 {
-            return Err(Rejection::new(StatusCode::BAD_REQUEST, "expected three path parameters"));
+            return Err(Rejection::new(
+                StatusCode::BAD_REQUEST,
+                "expected three path parameters",
+            ));
         }
         Ok((
             A::parse_scalar(values[0])?,
@@ -813,14 +834,9 @@ where
             Some(limit) => request.map(|body| boxed_body(LimitedBody::new(body, limit))),
             None => request,
         };
-        let future = self.handler.call(
-            request,
-            state,
-            RequestMeta {
-                params,
-                body_limit,
-            },
-        );
+        let future = self
+            .handler
+            .call(request, state, RequestMeta { params, body_limit });
         match timeout {
             Some(duration) => Box::pin(async move {
                 let timer = async_io::Timer::after(duration);
@@ -1193,17 +1209,21 @@ impl<S> Router<S> {
                 let entry = &self.routes[*matched.value];
                 match entry.1.methods.methods.get(&method) {
                     Some(endpoint) => (Some(endpoint), params),
-                    None => return Box::pin(async move {
-                        let mut response = response_with_body(
-                            StatusCode::METHOD_NOT_ALLOWED,
-                            "method not allowed",
-                        );
-                        response.headers_mut().insert(
-                            ALLOW,
-                            HeaderValue::from_static("GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS"),
-                        );
-                        response
-                    }),
+                    None => {
+                        return Box::pin(async move {
+                            let mut response = response_with_body(
+                                StatusCode::METHOD_NOT_ALLOWED,
+                                "method not allowed",
+                            );
+                            response.headers_mut().insert(
+                                ALLOW,
+                                HeaderValue::from_static(
+                                    "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS",
+                                ),
+                            );
+                            response
+                        })
+                    }
                 }
             }
             None => (self.fallback.as_ref(), RouteParams::default()),
@@ -1216,7 +1236,9 @@ impl<S> Router<S> {
         #[cfg(feature = "cors")]
         if let Some(cors) = &self.cors {
             let cors = cors.clone();
-            return Box::pin(async move { cors.apply_response(future.await, request_origin.as_ref()) });
+            return Box::pin(
+                async move { cors.apply_response(future.await, request_origin.as_ref()) },
+            );
         }
         future
     }
@@ -1363,7 +1385,9 @@ where
         Box::pin(async move {
             serde_urlencoded::from_str(&query)
                 .map(|value| (Self(value), request))
-                .map_err(|error| Rejection::new(StatusCode::BAD_REQUEST, format!("invalid query: {error}")))
+                .map_err(|error| {
+                    Rejection::new(StatusCode::BAD_REQUEST, format!("invalid query: {error}"))
+                })
         })
     }
 }
@@ -1395,7 +1419,9 @@ where
         match serde_json::to_vec(&self.0) {
             Ok(bytes) => {
                 let mut response = Bytes::from(bytes).into_response();
-                response.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+                response
+                    .headers_mut()
+                    .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
                 response
             }
             Err(error) => response_with_body(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
@@ -1426,8 +1452,9 @@ where
                     Rejection::new(StatusCode::BAD_REQUEST, "failed to read JSON body")
                 }
             })?;
-            let value = serde_json::from_slice(&bytes)
-                .map_err(|error| Rejection::new(StatusCode::BAD_REQUEST, format!("invalid JSON: {error}")))?;
+            let value = serde_json::from_slice(&bytes).map_err(|error| {
+                Rejection::new(StatusCode::BAD_REQUEST, format!("invalid JSON: {error}"))
+            })?;
             Ok((Self(value), Request::from_parts(parts, empty_body())))
         })
     }
@@ -1627,7 +1654,10 @@ impl KeepAlive {
 
     /// Set the maximum idle interval between keepalive comments.
     pub fn interval(mut self, interval: Duration) -> Self {
-        assert!(!interval.is_zero(), "SSE keepalive interval must be non-zero");
+        assert!(
+            !interval.is_zero(),
+            "SSE keepalive interval must be non-zero"
+        );
         self.interval = interval;
         self
     }
@@ -1694,10 +1724,7 @@ where
 {
     type Item = S::Item;
 
-    fn poll_next(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // `inner` is pinned for the lifetime of this wrapper. The timer and
         // policy are not pinned fields and are only accessed in place.
         // SAFETY: projecting the pinned wrapper to `inner` never moves it;
@@ -1755,12 +1782,18 @@ where
 {
     fn into_response(self) -> Response {
         let stream = futures_util::StreamExt::map(self.stream, |item| {
-            item.into_sse_event().map(|event| Frame::data(event.encode()))
+            item.into_sse_event()
+                .map(|event| Frame::data(event.encode()))
         });
         let body = h12tiny_util::frame_stream_body(stream);
         let mut response = HttpResponse::new(boxed_body(body));
-        response.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
-        response.headers_mut().insert(http::header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+        response
+            .headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+        response.headers_mut().insert(
+            http::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache"),
+        );
         response
     }
 }
@@ -1810,17 +1843,31 @@ impl Cors {
     }
 
     fn origin_allowed(&self, origin: &HeaderValue) -> bool {
-        self.origins.iter().any(|allowed| allowed == "*" || allowed == origin)
+        self.origins
+            .iter()
+            .any(|allowed| allowed == "*" || allowed == origin)
     }
 
     fn preflight_response(&self, origin: Option<&HeaderValue>) -> Response {
         let mut response = StatusCode::NO_CONTENT.into_response();
         response.headers_mut().insert(ALLOW, self.methods.clone());
-        response.headers_mut().insert(HeaderName::from_static("access-control-allow-methods"), self.methods.clone());
-        response.headers_mut().insert(HeaderName::from_static("access-control-allow-headers"), self.headers.clone());
+        response.headers_mut().insert(
+            HeaderName::from_static("access-control-allow-methods"),
+            self.methods.clone(),
+        );
+        response.headers_mut().insert(
+            HeaderName::from_static("access-control-allow-headers"),
+            self.headers.clone(),
+        );
         if let Some(origin) = origin.filter(|origin| self.origin_allowed(origin)) {
-            response.headers_mut().insert(HeaderName::from_static("access-control-allow-origin"), origin.clone());
-            response.headers_mut().insert(HeaderName::from_static("vary"), HeaderValue::from_static("Origin"));
+            response.headers_mut().insert(
+                HeaderName::from_static("access-control-allow-origin"),
+                origin.clone(),
+            );
+            response.headers_mut().insert(
+                HeaderName::from_static("vary"),
+                HeaderValue::from_static("Origin"),
+            );
         }
         response
     }
@@ -1870,9 +1917,8 @@ where
 /// and binary messages and validated UTF-8 text. Control-frame replies remain
 /// explicit through the callback passed to `read_frame`.
 #[cfg(feature = "websocket")]
-pub type WebSocketReader = FragmentCollectorRead<
-    futures_lite::io::ReadHalf<HyperIo<h12tiny_server::upgrade::Upgraded>>,
->;
+pub type WebSocketReader =
+    FragmentCollectorRead<futures_lite::io::ReadHalf<HyperIo<h12tiny_server::upgrade::Upgraded>>>;
 
 /// The writer half of an accepted server-role WebSocket connection.
 #[cfg(feature = "websocket")]
@@ -2025,12 +2071,7 @@ fn validate_websocket_request(request: &Request) -> Result<String, WebSocketUpgr
     if request.version() != Version::HTTP_11 {
         return Err(WebSocketUpgradeError::HttpVersion);
     }
-    if request
-        .headers()
-        .get_all("host")
-        .iter()
-        .count()
-        != 1
+    if request.headers().get_all("host").iter().count() != 1
         || request
             .headers()
             .get("host")
@@ -2108,35 +2149,61 @@ mod tests {
     fn routes_methods_and_wildcards() {
         let router = Router::new()
             .route("/hello", get(hello))
-            .route("/files/{*rest}", get(|Path(path): Path<String>| async move { path }))
-            .route("/pairs/{name}/{id}", get(|Path((name, id)): Path<(String, u64)>| async move { format!("{name}:{id}") }))
-            .route("/items/{id}", post(|Path(id): Path<u64>| async move { id.to_string() }));
-        let response = block_on(router.call(Request::get("/hello").body(h12tiny_util::empty_body()).unwrap()));
+            .route(
+                "/files/{*rest}",
+                get(|Path(path): Path<String>| async move { path }),
+            )
+            .route(
+                "/pairs/{name}/{id}",
+                get(|Path((name, id)): Path<(String, u64)>| async move { format!("{name}:{id}") }),
+            )
+            .route(
+                "/items/{id}",
+                post(|Path(id): Path<u64>| async move { id.to_string() }),
+            );
+        let response = block_on(
+            router.call(
+                Request::get("/hello")
+                    .body(h12tiny_util::empty_body())
+                    .unwrap(),
+            ),
+        );
         assert_eq!(response.status(), StatusCode::OK);
         let body = block_on(response.into_body().collect()).unwrap().to_bytes();
         assert_eq!(&body[..], b"hello");
 
-        let response = block_on(router.call(Request::get("/files/a/b").body(h12tiny_util::empty_body()).unwrap()));
+        let response = block_on(
+            router.call(
+                Request::get("/files/a/b")
+                    .body(h12tiny_util::empty_body())
+                    .unwrap(),
+            ),
+        );
         let body = block_on(response.into_body().collect()).unwrap().to_bytes();
         assert_eq!(&body[..], b"a/b");
     }
 
     #[test]
     fn state_extension_and_body_limit_are_in_memory() {
-        let mut request = Request::post("/upload").body(h12tiny_util::bytes_body("12345")).unwrap();
+        let mut request = Request::post("/upload")
+            .body(h12tiny_util::bytes_body("12345"))
+            .unwrap();
         request.extensions_mut().insert(7_u32);
         let router = Router::new()
             .route(
                 "/upload",
-                post(|State(state): State<String>, Extension(number): Extension<u32>, body: Bytes| async move {
-                    format!("{state}:{number}:{}", body.len())
-                })
+                post(
+                    |State(state): State<String>,
+                     Extension(number): Extension<u32>,
+                     body: Bytes| async move {
+                        format!("{state}:{number}:{}", body.len())
+                    },
+                )
                 .body_limit(4),
             )
             .with_state("state".to_owned());
         let response = block_on(router.call(request));
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-
     }
 
     #[test]
@@ -2144,16 +2211,40 @@ mod tests {
         let nested = Router::new()
             .route("/", get(|| async { "root" }))
             .route("/health", get(|| async { "ok" }));
-        let router = Router::new().nest("/api", nested).fallback(|| async {
-            (StatusCode::NOT_FOUND, "fallback")
-        });
-        let response = block_on(router.call(Request::get("/api").body(h12tiny_util::empty_body()).unwrap()));
+        let router = Router::new()
+            .nest("/api", nested)
+            .fallback(|| async { (StatusCode::NOT_FOUND, "fallback") });
+        let response = block_on(
+            router.call(
+                Request::get("/api")
+                    .body(h12tiny_util::empty_body())
+                    .unwrap(),
+            ),
+        );
         assert_eq!(response.status(), StatusCode::OK);
-        let response = block_on(router.call(Request::get("/api/").body(h12tiny_util::empty_body()).unwrap()));
+        let response = block_on(
+            router.call(
+                Request::get("/api/")
+                    .body(h12tiny_util::empty_body())
+                    .unwrap(),
+            ),
+        );
         assert_eq!(response.status(), StatusCode::OK);
-        let response = block_on(router.call(Request::get("/api/health").body(h12tiny_util::empty_body()).unwrap()));
+        let response = block_on(
+            router.call(
+                Request::get("/api/health")
+                    .body(h12tiny_util::empty_body())
+                    .unwrap(),
+            ),
+        );
         assert_eq!(response.status(), StatusCode::OK);
-        let response = block_on(router.call(Request::get("/missing").body(h12tiny_util::empty_body()).unwrap()));
+        let response = block_on(
+            router.call(
+                Request::get("/missing")
+                    .body(h12tiny_util::empty_body())
+                    .unwrap(),
+            ),
+        );
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
         let router = Router::new().route(
@@ -2164,7 +2255,13 @@ mod tests {
             })
             .timeout(Duration::from_millis(1)),
         );
-        let response = block_on(router.call(Request::get("/slow").body(h12tiny_util::empty_body()).unwrap()));
+        let response = block_on(
+            router.call(
+                Request::get("/slow")
+                    .body(h12tiny_util::empty_body())
+                    .unwrap(),
+            ),
+        );
         assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
     }
 
@@ -2235,10 +2332,9 @@ mod tests {
         );
 
         let mut repeated_version = websocket_request("dGhlIHNhbXBsZSBub25jZQ==");
-        repeated_version.headers_mut().append(
-            "sec-websocket-version",
-            HeaderValue::from_static("13"),
-        );
+        repeated_version
+            .headers_mut()
+            .append("sec-websocket-version", HeaderValue::from_static("13"));
         assert_eq!(
             WebSocketUpgrade::try_from_request(&mut repeated_version).err(),
             Some(WebSocketUpgradeError::Version)
@@ -2282,19 +2378,23 @@ mod tests {
                     .unwrap_or_else(|| "absent".to_owned())
             }),
         );
-        let response = block_on(router.call(
-            Request::post("/optional")
-                .body(h12tiny_util::empty_body())
-                .unwrap(),
-        ));
+        let response = block_on(
+            router.call(
+                Request::post("/optional")
+                    .body(h12tiny_util::empty_body())
+                    .unwrap(),
+            ),
+        );
         let body = block_on(response.into_body().collect()).unwrap().to_bytes();
         assert_eq!(&body[..], b"absent");
 
-        let response = block_on(router.call(
-            Request::post("/optional")
-                .body(h12tiny_util::bytes_body("not json"))
-                .unwrap(),
-        ));
+        let response = block_on(
+            router.call(
+                Request::post("/optional")
+                    .body(h12tiny_util::bytes_body("not json"))
+                    .unwrap(),
+            ),
+        );
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -2308,11 +2408,15 @@ mod tests {
 
         let router = Router::<()>::new().route(
             "/search",
-            get(|Query(filters): Query<Filters>, RawQuery(raw): RawQuery| async move {
-                format!("{}:{}", filters.page, raw.unwrap())
-            }),
+            get(
+                |Query(filters): Query<Filters>, RawQuery(raw): RawQuery| async move {
+                    format!("{}:{}", filters.page, raw.unwrap())
+                },
+            ),
         );
-        let request = Request::get("/search?page=3").body(h12tiny_util::empty_body()).unwrap();
+        let request = Request::get("/search?page=3")
+            .body(h12tiny_util::empty_body())
+            .unwrap();
         let response = block_on(router.call(request));
         let body = block_on(response.into_body().collect()).unwrap().to_bytes();
         assert_eq!(&body[..], b"3:page=3");
@@ -2321,8 +2425,15 @@ mod tests {
     #[cfg(feature = "sse")]
     #[test]
     fn sse_frames_standard_fields() {
-        let event = Event::new().event("message").id("1").retry(5000).data("one\ntwo");
-        assert_eq!(&event.encode()[..], b"data: one\ndata: two\nevent: message\nid: 1\nretry: 5000\n\n");
+        let event = Event::new()
+            .event("message")
+            .id("1")
+            .retry(5000)
+            .data("one\ntwo");
+        assert_eq!(
+            &event.encode()[..],
+            b"data: one\ndata: two\nevent: message\nid: 1\nretry: 5000\n\n"
+        );
         let response = Sse::new(futures_util::stream::iter(vec![event])).into_response();
         assert_eq!(response.headers()[CONTENT_TYPE], "text/event-stream");
     }
@@ -2334,18 +2445,27 @@ mod tests {
         use futures_util::StreamExt;
         use std::convert::Infallible;
 
-        let source = futures_util::stream::once(async {
-            Ok::<_, Infallible>(Event::new().data("first"))
-        })
-        .chain(futures_util::stream::pending());
+        let source =
+            futures_util::stream::once(async { Ok::<_, Infallible>(Event::new().data("first")) })
+                .chain(futures_util::stream::pending());
         let response = Sse::new(source)
-            .keep_alive(KeepAlive::new().interval(Duration::from_millis(15)).text("tick"))
+            .keep_alive(
+                KeepAlive::new()
+                    .interval(Duration::from_millis(15))
+                    .text("tick"),
+            )
             .into_response();
         let mut data = response.into_body().into_data_stream();
 
-        assert_eq!(block_on(data.next()).unwrap().unwrap(), Bytes::from_static(b"data: first\n\n"));
+        assert_eq!(
+            block_on(data.next()).unwrap().unwrap(),
+            Bytes::from_static(b"data: first\n\n")
+        );
         assert!(block_on(poll_once(data.next())).is_none());
-        assert_eq!(block_on(data.next()).unwrap().unwrap(), Bytes::from_static(b":tick\n\n"));
+        assert_eq!(
+            block_on(data.next()).unwrap().unwrap(),
+            Bytes::from_static(b":tick\n\n")
+        );
     }
 
     #[cfg(feature = "sse")]
@@ -2361,17 +2481,17 @@ mod tests {
         use futures_lite::future::poll_once;
         use futures_util::{Stream, StreamExt};
         use std::convert::Infallible;
-        use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
 
         struct PendingStream(Arc<AtomicBool>);
 
         impl Stream for PendingStream {
             type Item = Result<Event, Infallible>;
 
-            fn poll_next(
-                self: Pin<&mut Self>,
-                _cx: &mut Context<'_>,
-            ) -> Poll<Option<Self::Item>> {
+            fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
                 Poll::Pending
             }
         }

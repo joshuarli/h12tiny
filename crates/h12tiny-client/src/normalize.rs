@@ -210,7 +210,10 @@ mod tests {
     #[test]
     fn relative_and_malformed_direct_uris_are_rejected() {
         let mut relative = Uri::from_static("/only-a-path");
-        assert_eq!(extract_pool_key(&mut relative, false), Err(Error::AbsoluteUriRequired));
+        assert_eq!(
+            extract_pool_key(&mut relative, false),
+            Err(Error::AbsoluteUriRequired)
+        );
 
         // `http::Uri` rejects malformed absolute forms before the public
         // request API can receive a value; this is the boundary proof for a

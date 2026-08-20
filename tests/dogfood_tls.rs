@@ -67,12 +67,20 @@ fn tls_alpn_http11_validates_fixture_certificate_and_streams_bodies() {
             server_counters.tcp_opened();
             let mut config = fixture_server_config();
             config.alpn_protocols = vec![b"http/1.1".to_vec()];
-            let tls = TlsAcceptor::from(Arc::new(config)).accept(stream).await.unwrap();
+            let tls = TlsAcceptor::from(Arc::new(config))
+                .accept(stream)
+                .await
+                .unwrap();
             assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"http/1.1"[..]));
             server_counters.tls_completed();
             server_counters.h1_opened();
             auto::Builder::new(BoxExecutor::new(SmolExecutor))
-                .serve_tls_connection(tls, EchoService { counters: server_counters.clone() })
+                .serve_tls_connection(
+                    tls,
+                    EchoService {
+                        counters: server_counters.clone(),
+                    },
+                )
                 .unwrap()
                 .await
                 .unwrap();
@@ -131,7 +139,12 @@ fn concurrent_first_tls_h2_requests_share_one_handshake_and_session() {
             server_counters.tls_completed();
             server_counters.h2_opened();
             auto::Builder::new(BoxExecutor::new(SmolExecutor))
-                .serve_tls_connection(tls, EchoService { counters: server_counters.clone() })
+                .serve_tls_connection(
+                    tls,
+                    EchoService {
+                        counters: server_counters.clone(),
+                    },
+                )
                 .unwrap()
                 .await
                 .unwrap();
@@ -219,7 +232,10 @@ fn unexpected_tls_alpn_surfaces_an_alpn_error() {
             let (stream, _) = listener.accept().await.unwrap();
             let mut config = fixture_server_config();
             config.alpn_protocols = vec![b"not-http".to_vec()];
-            let tls = TlsAcceptor::from(Arc::new(config)).accept(stream).await.unwrap();
+            let tls = TlsAcceptor::from(Arc::new(config))
+                .accept(stream)
+                .await
+                .unwrap();
             assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"not-http"[..]));
         });
 

@@ -156,8 +156,12 @@ fn sequential_h1_requests_reuse_one_direct_connection() {
             Either::Left((requests, _)) => requests,
             Either::Right(_) => panic!("second request did not reuse the open HTTP/1 connection"),
         };
-        assert!(std::str::from_utf8(&first).unwrap().starts_with("GET /one HTTP/1.1"));
-        assert!(std::str::from_utf8(&second).unwrap().starts_with("GET /two HTTP/1.1"));
+        assert!(std::str::from_utf8(&first)
+            .unwrap()
+            .starts_with("GET /one HTTP/1.1"));
+        assert!(std::str::from_utf8(&second)
+            .unwrap()
+            .starts_with("GET /two HTTP/1.1"));
     });
 }
 
@@ -257,9 +261,13 @@ fn explicit_host_and_connect_authority_form_are_preserved_on_the_wire() {
 
         let (explicit_host, connect) = peer.await;
         let explicit_host = std::str::from_utf8(&explicit_host).unwrap();
-        assert!(explicit_host.starts_with("GET /explicit-host HTTP/1.1\r\nHost: chosen.example\r\n"));
+        assert!(
+            explicit_host.starts_with("GET /explicit-host HTTP/1.1\r\nHost: chosen.example\r\n")
+        );
         let connect = std::str::from_utf8(&connect).unwrap();
-        assert!(connect.starts_with(&format!("CONNECT {address} HTTP/1.1\r\nHost: {address}\r\n")));
+        assert!(connect.starts_with(&format!(
+            "CONNECT {address} HTTP/1.1\r\nHost: {address}\r\n"
+        )));
     });
 }
 
@@ -268,7 +276,12 @@ fn client_classifies_relative_and_unsupported_schemes() {
     smol::block_on(async {
         let client = Client::builder(SmolExecutor).build::<EmptyBody>();
         let relative = client
-            .request(Request::builder().uri("/only-a-path").body(EmptyBody).unwrap())
+            .request(
+                Request::builder()
+                    .uri("/only-a-path")
+                    .body(EmptyBody)
+                    .unwrap(),
+            )
             .await
             .unwrap_err();
         assert_eq!(relative.kind(), ErrorKind::AbsoluteUriRequired);
@@ -304,7 +317,11 @@ fn ipv6_literal_synthesizes_a_bracketed_host_header() {
         let response = client
             .request(
                 Request::builder()
-                    .uri(format!("http://[{ip}]:{port}/ipv6", ip = "::1", port = address.port()))
+                    .uri(format!(
+                        "http://[{ip}]:{port}/ipv6",
+                        ip = "::1",
+                        port = address.port()
+                    ))
                     .body(EmptyBody)
                     .unwrap(),
             )
@@ -332,7 +349,11 @@ fn cancelling_h1_request_closes_that_session_before_a_later_request() {
             let _request = read_head(&mut first).await;
             let _ = started_tx.send(());
             let mut byte = [0; 1];
-            assert_eq!(first.read(&mut byte).await.unwrap(), 0, "cancelled H1 session remained open");
+            assert_eq!(
+                first.read(&mut byte).await.unwrap(),
+                0,
+                "cancelled H1 session remained open"
+            );
 
             let (mut second, _) = listener.accept().await.unwrap();
             let request = read_head(&mut second).await;
@@ -344,12 +365,14 @@ fn cancelling_h1_request_closes_that_session_before_a_later_request() {
         });
 
         let client = Client::builder(SmolExecutor).build::<EmptyBody>();
-        let cancelled = smol::spawn(client.clone().request(
-            Request::builder()
-                .uri(format!("http://{address}/cancelled"))
-                .body(EmptyBody)
-                .unwrap(),
-        ));
+        let cancelled = smol::spawn(
+            client.clone().request(
+                Request::builder()
+                    .uri(format!("http://{address}/cancelled"))
+                    .body(EmptyBody)
+                    .unwrap(),
+            ),
+        );
         started_rx.await.unwrap();
         drop(cancelled);
 
@@ -370,6 +393,8 @@ fn cancelling_h1_request_closes_that_session_before_a_later_request() {
             Either::Left((request, _)) => request,
             Either::Right(_) => panic!("later request did not reconnect after H1 cancellation"),
         };
-        assert!(String::from_utf8(request).unwrap().starts_with("GET /later HTTP/1.1"));
+        assert!(String::from_utf8(request)
+            .unwrap()
+            .starts_with("GET /later HTTP/1.1"));
     });
 }

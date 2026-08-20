@@ -18,9 +18,7 @@ use h12tiny::web::{get, Router};
 use http::{Request, StatusCode};
 use support::SmolExecutor;
 
-async fn serve_once(
-    h2: bool,
-) -> (std::net::SocketAddr, smol::Task<()>) {
+async fn serve_once(h2: bool) -> (std::net::SocketAddr, smol::Task<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = smol::spawn(async move {

@@ -40,11 +40,11 @@ async fn serve_web_tls_once(http2: bool) -> (u16, oneshot::Sender<()>, smol::Tas
             router,
             BoxExecutor::new(SmolExecutor),
         )
-            .shutdown_on(async move {
-                let _ = shutdown_rx.await;
-            })
-            .await
-            .unwrap();
+        .shutdown_on(async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
     });
     (port, shutdown_tx, server)
 }
