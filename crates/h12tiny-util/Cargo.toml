@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 
 [features]
 default = []
-json = ["dep:serde", "dep:serde_json"]
+json = ["dep:miniserde"]
 
 [dependencies]
 async-io = { workspace = true }
@@ -19,8 +19,7 @@ http = { workspace = true }
 http-body = { workspace = true }
 http-body-util = "0.1.5"
 pin-project-lite = { workspace = true }
-serde = { version = "1.0.228", features = ["derive"], optional = true }
-serde_json = { version = "1.0.151", optional = true }
+miniserde = { version = "0.1.46", optional = true }
 
 [dev-dependencies]
 futures-lite = { workspace = true }

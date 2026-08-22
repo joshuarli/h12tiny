@@ -1369,9 +1369,90 @@ impl<T> Query<T> {
 }
 
 #[cfg(feature = "query")]
+fn decode_query_component(input: &str) -> Result<String, &'static str> {
+    fn hex_digit(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    let bytes = input.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => output.push(b' '),
+            b'%' => {
+                let high = bytes
+                    .get(index + 1)
+                    .and_then(|byte| hex_digit(*byte))
+                    .ok_or("invalid percent escape")?;
+                let low = bytes
+                    .get(index + 2)
+                    .and_then(|byte| hex_digit(*byte))
+                    .ok_or("invalid percent escape")?;
+                output.push(high << 4 | low);
+                index += 2;
+            }
+            byte => output.push(byte),
+        }
+        index += 1;
+    }
+
+    String::from_utf8(output).map_err(|_| "query is not valid UTF-8")
+}
+
+#[cfg(feature = "query")]
+fn query_value_as_json(value: &str) -> String {
+    if matches!(value, "true" | "false" | "null") {
+        return value.to_owned();
+    }
+    if let Ok(number) = value.parse::<i64>() {
+        return number.to_string();
+    }
+    if let Ok(number) = value.parse::<u64>() {
+        return number.to_string();
+    }
+    if let Ok(number) = value.parse::<f64>() {
+        if number.is_finite() {
+            return number.to_string();
+        }
+    }
+    miniserde::json::to_string(&value)
+}
+
+#[cfg(feature = "query")]
+/// Convert URL-encoded query pairs into a miniserde JSON object.
+///
+/// Miniserde intentionally supports JSON rather than form encoding. Query
+/// values that are valid JSON primitives retain their primitive type so typed
+/// extractors such as `Query<Filters { page: u32 }>` continue to work.
+fn query_as_json(query: &str) -> Result<String, &'static str> {
+    let mut output = String::from("{");
+    let mut has_pair = false;
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (raw_key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
+        let key = decode_query_component(raw_key)?;
+        let value = decode_query_component(raw_value)?;
+        if has_pair {
+            output.push(',');
+        }
+        has_pair = true;
+        output.push_str(&miniserde::json::to_string(&key));
+        output.push(':');
+        output.push_str(&query_value_as_json(&value));
+    }
+    output.push('}');
+    Ok(output)
+}
+
+#[cfg(feature = "query")]
 impl<S, T> FromRequest<S> for Query<T>
 where
-    T: serde::de::DeserializeOwned + Send + 'static,
+    T: miniserde::Deserialize + Send + 'static,
     S: Send + Sync + 'static,
 {
     type Rejection = Rejection;
@@ -1383,7 +1464,8 @@ where
     ) -> Pin<Box<dyn Future<Output = Result<(Self, Request), Self::Rejection>> + Send>> {
         let query = request.uri().query().unwrap_or_default().to_owned();
         Box::pin(async move {
-            serde_urlencoded::from_str(&query)
+            query_as_json(&query)
+                .and_then(|json| miniserde::json::from_str(&json).map_err(|_| "invalid query"))
                 .map(|value| (Self(value), request))
                 .map_err(|error| {
                     Rejection::new(StatusCode::BAD_REQUEST, format!("invalid query: {error}"))
@@ -1413,26 +1495,21 @@ impl<T> Json<T> {
 #[cfg(feature = "json")]
 impl<T> IntoResponse for Json<T>
 where
-    T: serde::Serialize,
+    T: miniserde::Serialize,
 {
     fn into_response(self) -> Response {
-        match serde_json::to_vec(&self.0) {
-            Ok(bytes) => {
-                let mut response = Bytes::from(bytes).into_response();
-                response
-                    .headers_mut()
-                    .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-                response
-            }
-            Err(error) => response_with_body(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
-        }
+        let mut response = Bytes::from(miniserde::json::to_string(&self.0)).into_response();
+        response
+            .headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        response
     }
 }
 
 #[cfg(feature = "json")]
 impl<S, T> FromRequest<S> for Json<T>
 where
-    T: serde::de::DeserializeOwned + Send + 'static,
+    T: miniserde::Deserialize + Send + 'static,
     S: Send + Sync + 'static,
 {
     type Rejection = Rejection;
@@ -1452,7 +1529,10 @@ where
                     Rejection::new(StatusCode::BAD_REQUEST, "failed to read JSON body")
                 }
             })?;
-            let value = serde_json::from_slice(&bytes).map_err(|error| {
+            let text = std::str::from_utf8(&bytes).map_err(|_| {
+                Rejection::new(StatusCode::BAD_REQUEST, "invalid JSON: miniserde error")
+            })?;
+            let value = miniserde::json::from_str(text).map_err(|error| {
                 Rejection::new(StatusCode::BAD_REQUEST, format!("invalid JSON: {error}"))
             })?;
             Ok((Self(value), Request::from_parts(parts, empty_body())))
@@ -1467,7 +1547,7 @@ where
 #[cfg(feature = "json")]
 impl<S, T> FromRequest<S> for Option<Json<T>>
 where
-    T: serde::de::DeserializeOwned + Send + 'static,
+    T: miniserde::Deserialize + Send + 'static,
     S: Send + Sync + 'static,
 {
     type Rejection = Rejection;
@@ -1490,7 +1570,10 @@ where
             let value = if bytes.is_empty() {
                 None
             } else {
-                Some(Json(serde_json::from_slice(&bytes).map_err(|error| {
+                let text = std::str::from_utf8(&bytes).map_err(|_| {
+                    Rejection::new(StatusCode::BAD_REQUEST, "invalid JSON: miniserde error")
+                })?;
+                Some(Json(miniserde::json::from_str(text).map_err(|error| {
                     Rejection::new(StatusCode::BAD_REQUEST, format!("invalid JSON: {error}"))
                 })?))
             };
@@ -2344,7 +2427,7 @@ mod tests {
     #[cfg(feature = "json")]
     #[test]
     fn json_extractor_and_response_are_bounded() {
-        #[derive(serde::Deserialize, serde::Serialize)]
+        #[derive(miniserde::Deserialize, miniserde::Serialize)]
         struct Payload {
             name: String,
         }
@@ -2365,7 +2448,7 @@ mod tests {
     #[cfg(feature = "json")]
     #[test]
     fn optional_json_distinguishes_an_empty_body_from_invalid_json() {
-        #[derive(serde::Deserialize)]
+        #[derive(miniserde::Deserialize)]
         struct Payload {
             name: String,
         }
@@ -2401,7 +2484,7 @@ mod tests {
     #[cfg(feature = "query")]
     #[test]
     fn query_and_raw_query_extract_without_protocol_state() {
-        #[derive(serde::Deserialize)]
+        #[derive(miniserde::Deserialize)]
         struct Filters {
             page: u32,
         }

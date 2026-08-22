@@ -362,7 +362,7 @@ pub enum BodyCollectionError<E> {
     InvalidUtf8(std::string::FromUtf8Error),
     #[cfg(feature = "json")]
     /// JSON deserialization failed after the body was collected.
-    Json(serde_json::Error),
+    Json(miniserde::Error),
 }
 
 /// The clear, structured error returned when a collection exceeds its cap.
@@ -497,7 +497,7 @@ pub trait ResponseBodyExt: Sized {
 
     #[cfg(feature = "json")]
     /// Collect response data and deserialize JSON while enforcing `limit`.
-    fn json_limited<T: serde::de::DeserializeOwned>(
+    fn json_limited<T: miniserde::Deserialize>(
         self,
         limit: usize,
     ) -> impl Future<Output = Result<T, BodyCollectionError<Self::BodyError>>>;
@@ -525,12 +525,14 @@ where
     }
 
     #[cfg(feature = "json")]
-    async fn json_limited<T: serde::de::DeserializeOwned>(
+    async fn json_limited<T: miniserde::Deserialize>(
         self,
         limit: usize,
     ) -> Result<T, BodyCollectionError<Self::BodyError>> {
         let bytes = collect_bytes_limited(self.into_body(), limit).await?;
-        serde_json::from_slice(&bytes).map_err(BodyCollectionError::Json)
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| BodyCollectionError::Json(miniserde::Error))?;
+        miniserde::json::from_str(text).map_err(BodyCollectionError::Json)
     }
 }
 
@@ -661,17 +663,17 @@ pub fn replayable_value<T: Clone>(value: T) -> BodyFactory<impl Fn() -> T + Clon
 #[cfg(feature = "json")]
 mod json {
     use super::{bytes_body, Bytes, Full, HeaderValue, Response};
-    use serde::Serialize;
+    use miniserde::Serialize;
 
     /// Serialize a value as a JSON request body.
-    pub fn json_body<T: Serialize>(value: &T) -> Result<Full<Bytes>, serde_json::Error> {
-        serde_json::to_vec(value).map(bytes_body)
+    pub fn json_body<T: Serialize>(value: &T) -> Result<Full<Bytes>, miniserde::Error> {
+        Ok(bytes_body(miniserde::json::to_string(value)))
     }
 
     /// Serialize a value as a JSON response and set its media type.
     pub fn json_response<T: Serialize>(
         value: &T,
-    ) -> Result<Response<Full<Bytes>>, serde_json::Error> {
+    ) -> Result<Response<Full<Bytes>>, miniserde::Error> {
         let mut response = Response::new(json_body(value)?);
         response.headers_mut().insert(
             http::header::CONTENT_TYPE,
@@ -756,12 +758,17 @@ mod tests {
     #[cfg(feature = "json")]
     #[test]
     fn json_body_and_bounded_decode_set_media_type() {
-        let response = json_response(&serde_json::json!({ "ok": true })).unwrap();
+        #[derive(miniserde::Deserialize, miniserde::Serialize)]
+        struct Payload {
+            ok: bool,
+        }
+
+        let response = json_response(&Payload { ok: true }).unwrap();
         assert_eq!(
             response.headers()[http::header::CONTENT_TYPE],
             "application/json"
         );
-        let decoded: serde_json::Value = block_on(response.json_limited(64)).unwrap();
-        assert_eq!(decoded["ok"], true);
+        let decoded: Payload = block_on(response.json_limited(64)).unwrap();
+        assert!(decoded.ok);
     }
 }
