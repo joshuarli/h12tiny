@@ -18,7 +18,9 @@ use async_net::{TcpListener, TcpStream};
 use bytes::Bytes;
 use futures_rustls::TlsAcceptor;
 use futures_util::future::{self, Either};
-use h12tiny::client::{Client, Connector, ErrorKind, TcpConnected, TcpDialFuture, TcpDialer};
+use h12tiny::client::{
+    Client, Connector, ErrorKind, ResponseInfo, TcpConnected, TcpDialFuture, TcpDialer,
+};
 use h12tiny::runtime::BoxExecutor;
 use h12tiny::server::conn::auto;
 use http::header::CONTENT_LENGTH;
@@ -43,10 +45,12 @@ impl TcpDialer for FixtureTcpDialer {
         let host = origin.host().expect("fixture origin has host").to_owned();
         let port = origin.port_u16().expect("fixture origin has port");
         Box::pin(async move {
-            TcpStream::connect(format!("{host}:{port}"))
+            let stream = TcpStream::connect(format!("{host}:{port}"))
                 .await
-                .map(TcpConnected::new)
-                .map_err(|error| Box::new(error) as _)
+                .map_err(|error| Box::new(error) as h12tiny::client::DialError)?;
+            let local_addr = stream.local_addr().ok();
+            let peer_addr = stream.peer_addr().ok();
+            Ok(TcpConnected::new(stream).with_addresses(local_addr, peer_addr))
         })
     }
 }
@@ -75,7 +79,8 @@ impl Service<Request<Incoming>> for EchoService {
 fn tls_alpn_http11_validates_fixture_certificate_and_streams_bodies() {
     smol::block_on(async {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let address = listener.local_addr().unwrap();
+        let port = address.port();
         let counters = ConnectionCounters::default();
         let server_counters = counters.clone();
         let server = smol::spawn(async move {
@@ -88,6 +93,7 @@ fn tls_alpn_http11_validates_fixture_certificate_and_streams_bodies() {
                 .await
                 .unwrap();
             assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"http/1.1"[..]));
+            assert_eq!(tls.get_ref().1.server_name(), Some("localhost"));
             server_counters.tls_completed();
             server_counters.h1_opened();
             auto::Builder::new(BoxExecutor::new(SmolExecutor))
@@ -124,6 +130,11 @@ fn tls_alpn_http11_validates_fixture_certificate_and_streams_bodies() {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let response_info = *ResponseInfo::from_response(&response).unwrap();
+        assert_eq!(response_info.connection().peer_addr(), Some(address));
+        assert!(response_info.connection().local_addr().is_some());
+        assert!(response_info.connection().connect_duration().is_some());
+        assert!(response_info.connection().handshake_duration().is_some());
         assert_eq!(collect(response.into_body()).await, b"echo:stream");
         drop(client);
         server.await;
@@ -195,6 +206,45 @@ fn h1_only_tls_policy_selects_http11_when_fixture_offers_h2() {
         server.await;
         assert_eq!(counters.snapshot().h1_connections, 1);
         assert_eq!(counters.snapshot().h2_sessions, 0);
+    });
+}
+
+#[test]
+fn h2_only_tls_policy_rejects_http11_after_a_custom_tcp_dial() {
+    smol::block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = smol::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut config = fixture_server_config();
+            config.alpn_protocols = vec![b"http/1.1".to_vec()];
+            let tls = TlsAcceptor::from(Arc::new(config))
+                .accept(stream)
+                .await
+                .unwrap();
+            assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"http/1.1"[..]));
+        });
+
+        let connector = Connector::builder()
+            .tcp_dialer(FixtureTcpDialer)
+            .tls_config(fixture_client_config())
+            .build();
+        let mut builder = Client::builder(SmolExecutor);
+        builder.connector(connector).http2_only(true);
+        let client = builder.build::<FullBody>();
+        let error = client
+            .request(
+                Request::builder()
+                    .uri(format!("https://localhost:{port}/h2-required"))
+                    .body(FullBody::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Alpn);
+
+        drop(client);
+        server.await;
     });
 }
 

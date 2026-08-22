@@ -587,6 +587,13 @@ impl Connector {
         if !matches!(scheme, "http" | "https") {
             return Err(Error::UnsupportedScheme(scheme.to_owned()));
         }
+        #[cfg(not(feature = "tls"))]
+        if scheme == "https" {
+            // A TCP dialer is deliberately below h12tiny's TLS boundary. In
+            // a TLS-free build HTTPS is impossible, so reject it before a
+            // caller-owned dialer performs an unnecessary socket side effect.
+            return Err(Error::TlsDisabled);
+        }
         let tcp = match &self.kind {
             ConnectorKind::Tcp(dialer) => {
                 Some(dialer.connect(uri.clone()).await.map_err(Error::Custom)?)
@@ -927,6 +934,30 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct DropProbeTcpDialer {
+        dropped: Arc<AtomicUsize>,
+    }
+
+    struct PendingDialDropProbe(Arc<AtomicUsize>);
+
+    impl Drop for PendingDialDropProbe {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl TcpDialer for DropProbeTcpDialer {
+        fn connect(&self, _: Uri) -> TcpDialFuture {
+            let dropped = self.dropped.clone();
+            Box::pin(async move {
+                let _probe = PendingDialDropProbe(dropped);
+                std::future::pending::<()>().await;
+                unreachable!("pending TCP dial completed")
+            })
+        }
+    }
+
     struct PendingResolver;
 
     impl Resolver for PendingResolver {
@@ -1021,6 +1052,20 @@ mod tests {
     }
 
     #[test]
+    fn connect_timeout_drops_a_pending_tcp_dialer_future() {
+        let dialer = DropProbeTcpDialer::default();
+        let connector = Connector::builder()
+            .tcp_dialer(dialer.clone())
+            .connect_timeout(Duration::from_millis(1))
+            .build();
+        let result =
+            smol::block_on(connector.connect("http://example.test/".parse().unwrap(), false));
+
+        assert!(matches!(result, Err(Error::Timeout)));
+        assert_eq!(dialer.dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn tcp_dialer_is_not_called_for_an_unsupported_scheme() {
         let dialer = RecordingTcpDialer::default();
         let connector = Connector::with_tcp_dialer(dialer.clone());
@@ -1028,6 +1073,18 @@ mod tests {
             smol::block_on(connector.connect("ftp://example.test/".parse().unwrap(), false));
 
         assert!(matches!(result, Err(Error::UnsupportedScheme(scheme)) if scheme == "ftp"));
+        assert_eq!(dialer.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(not(feature = "tls"))]
+    #[test]
+    fn tcp_dialer_is_not_called_for_https_without_tls_support() {
+        let dialer = RecordingTcpDialer::default();
+        let connector = Connector::with_tcp_dialer(dialer.clone());
+        let result =
+            smol::block_on(connector.connect("https://example.test/".parse().unwrap(), false));
+
+        assert!(matches!(result, Err(Error::TlsDisabled)));
         assert_eq!(dialer.0.load(Ordering::SeqCst), 0);
     }
 

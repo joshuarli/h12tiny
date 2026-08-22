@@ -5,13 +5,21 @@ mod support;
 use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
+#[cfg(feature = "http1")]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "http1")]
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_net::TcpListener;
+#[cfg(feature = "http1")]
+use async_net::TcpStream;
 use futures_channel::oneshot;
 use futures_lite::io::{AsyncReadExt, AsyncWriteExt};
 use futures_util::future::{self, Either};
 use h12tiny::client::{Client, DebugEvent, DebugEventLog, ErrorKind};
+#[cfg(feature = "http1")]
+use h12tiny::client::{Connector, TcpConnected, TcpDialFuture, TcpDialer};
 use http::{Request, Response, StatusCode};
 use hyper::body::Incoming;
 use hyper::service::Service;
@@ -187,6 +195,107 @@ async fn read_head(stream: &mut async_net::TcpStream) -> Vec<u8> {
             return request;
         }
     }
+}
+
+#[cfg(feature = "http1")]
+#[derive(Clone, Default)]
+struct CancelThenConnectTcpDialer {
+    calls: Arc<AtomicUsize>,
+    drops: Arc<AtomicUsize>,
+}
+
+#[cfg(feature = "http1")]
+struct PendingDialDrop(Arc<AtomicUsize>);
+
+#[cfg(feature = "http1")]
+impl Drop for PendingDialDrop {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[cfg(feature = "http1")]
+impl TcpDialer for CancelThenConnectTcpDialer {
+    fn connect(&self, origin: http::Uri) -> TcpDialFuture {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let drops = self.drops.clone();
+            return Box::pin(async move {
+                let _probe = PendingDialDrop(drops);
+                std::future::pending::<()>().await;
+                unreachable!("pending TCP dial completed")
+            });
+        }
+
+        let host = origin.host().expect("fixture origin has a host").to_owned();
+        let port = origin.port_u16().expect("fixture origin has a port");
+        Box::pin(async move {
+            TcpStream::connect(format!("{host}:{port}"))
+                .await
+                .map(TcpConnected::new)
+                .map_err(|error| Box::new(error) as _)
+        })
+    }
+}
+
+#[cfg(feature = "http1")]
+#[test]
+fn cancelling_a_tcp_dialer_request_drops_the_dial_and_allows_a_later_request() {
+    smol::block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = smol::spawn(async move {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let request = read_head(&mut connection).await;
+            assert!(request.starts_with(b"GET /later HTTP/1.1"));
+            connection
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let dialer = CancelThenConnectTcpDialer::default();
+        let connector = Connector::with_tcp_dialer(dialer.clone());
+        let mut builder = Client::builder(SmolExecutor);
+        builder.connector(connector);
+        let client = builder.build::<FullBody>();
+        let cancelled = smol::spawn(client.clone().request(
+            Request::builder()
+                .uri(format!("http://{address}/cancelled"))
+                .body(FullBody::empty())
+                .unwrap(),
+        ));
+        for _ in 0..100 {
+            if dialer.calls.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            async_io::Timer::after(Duration::from_millis(1)).await;
+        }
+        assert_eq!(dialer.calls.load(Ordering::SeqCst), 1);
+        let _ = cancelled.cancel().await;
+
+        for _ in 0..100 {
+            if dialer.drops.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            async_io::Timer::after(Duration::from_millis(1)).await;
+        }
+        assert_eq!(dialer.drops.load(Ordering::SeqCst), 1);
+
+        let later = client
+            .request(
+                Request::builder()
+                    .uri(format!("http://{address}/later"))
+                    .body(FullBody::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(later.status(), StatusCode::OK);
+        drop(later);
+
+        drop(client);
+        server.await;
+    });
 }
 
 #[cfg(feature = "http1")]
