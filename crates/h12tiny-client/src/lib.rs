@@ -194,6 +194,132 @@ impl ResponseInfo {
     }
 }
 
+/// Stable HTTP/2 client settings independent of Hyper's builder API.
+///
+/// Every setting is opt-in: [`Http2Settings::new`] leaves Hyper's defaults
+/// untouched. Explicit flow-control window sizes disable Hyper's adaptive
+/// window unless [`Http2Settings::adaptive_window`] is set afterwards; an
+/// explicit adaptive setting wins over either window size.
+#[cfg(feature = "http2")]
+#[derive(Clone, Debug, Default)]
+pub struct Http2Settings {
+    initial_stream_window_size: Option<u32>,
+    initial_connection_window_size: Option<u32>,
+    adaptive_window: Option<bool>,
+    max_frame_size: Option<u32>,
+    max_header_list_size: Option<u32>,
+    header_table_size: Option<u32>,
+    keep_alive_interval: Option<Duration>,
+    keep_alive_timeout: Option<Duration>,
+    keep_alive_while_idle: Option<bool>,
+}
+
+#[cfg(feature = "http2")]
+impl Http2Settings {
+    /// Starts with no overrides, preserving Hyper's current defaults.
+    pub const fn new() -> Self {
+        Self {
+            initial_stream_window_size: None,
+            initial_connection_window_size: None,
+            adaptive_window: None,
+            max_frame_size: None,
+            max_header_list_size: None,
+            header_table_size: None,
+            keep_alive_interval: None,
+            keep_alive_timeout: None,
+            keep_alive_while_idle: None,
+        }
+    }
+
+    /// Sets the initial per-stream flow-control receive window.
+    pub const fn initial_stream_window_size(mut self, size: u32) -> Self {
+        self.initial_stream_window_size = Some(size);
+        self
+    }
+
+    /// Sets the initial connection-wide flow-control receive window.
+    pub const fn initial_connection_window_size(mut self, size: u32) -> Self {
+        self.initial_connection_window_size = Some(size);
+        self
+    }
+
+    /// Enables or disables Hyper's adaptive receive-window algorithm.
+    pub const fn adaptive_window(mut self, enabled: bool) -> Self {
+        self.adaptive_window = Some(enabled);
+        self
+    }
+
+    /// Sets the largest HTTP/2 frame accepted from the peer.
+    pub const fn max_frame_size(mut self, size: u32) -> Self {
+        self.max_frame_size = Some(size);
+        self
+    }
+
+    /// Sets the largest decoded HTTP/2 header list accepted from the peer.
+    pub const fn max_header_list_size(mut self, size: u32) -> Self {
+        self.max_header_list_size = Some(size);
+        self
+    }
+
+    /// Advertises the maximum HPACK dynamic-table size accepted from the peer.
+    pub const fn header_table_size(mut self, size: u32) -> Self {
+        self.header_table_size = Some(size);
+        self
+    }
+
+    /// Sends HTTP/2 keep-alive pings at this interval.
+    pub const fn keep_alive_interval(mut self, interval: Duration) -> Self {
+        self.keep_alive_interval = Some(interval);
+        self
+    }
+
+    /// Closes a connection when a keep-alive ping is not acknowledged in time.
+    ///
+    /// This has no effect until [`Self::keep_alive_interval`] is configured.
+    pub const fn keep_alive_timeout(mut self, timeout: Duration) -> Self {
+        self.keep_alive_timeout = Some(timeout);
+        self
+    }
+
+    /// Controls whether keep-alive pings continue with no active streams.
+    ///
+    /// This has no effect until [`Self::keep_alive_interval`] is configured.
+    pub const fn keep_alive_while_idle(mut self, enabled: bool) -> Self {
+        self.keep_alive_while_idle = Some(enabled);
+        self
+    }
+
+    fn apply(&self, builder: &mut hyper::client::conn::http2::Builder<BoxExecutor>) {
+        if let Some(size) = self.initial_stream_window_size {
+            builder.initial_stream_window_size(size);
+        }
+        if let Some(size) = self.initial_connection_window_size {
+            builder.initial_connection_window_size(size);
+        }
+        if let Some(size) = self.max_frame_size {
+            builder.max_frame_size(size);
+        }
+        if let Some(size) = self.max_header_list_size {
+            builder.max_header_list_size(size);
+        }
+        if let Some(size) = self.header_table_size {
+            builder.header_table_size(size);
+        }
+        if let Some(interval) = self.keep_alive_interval {
+            builder.keep_alive_interval(interval);
+        }
+        if let Some(timeout) = self.keep_alive_timeout {
+            builder.keep_alive_timeout(timeout);
+        }
+        if let Some(while_idle) = self.keep_alive_while_idle {
+            builder.keep_alive_while_idle(while_idle);
+        }
+        if let Some(adaptive) = self.adaptive_window {
+            builder.adaptive_window(adaptive);
+        }
+    }
+}
+
 /// A discrete endpoint-lifecycle observation recorded by [`DebugEventLog`].
 ///
 /// Events are best-effort development diagnostics. They do not establish a
@@ -790,7 +916,14 @@ impl Builder {
             #[cfg(feature = "http1")]
             h1_builder,
             #[cfg(feature = "http2")]
-            h2_builder: hyper::client::conn::http2::Builder::new(executor.clone()),
+            h2_builder: {
+                let mut builder = hyper::client::conn::http2::Builder::new(executor.clone());
+                // Hyper requires a timer before HTTP/2 keepalive can be
+                // enabled. `AsyncIoTimer` keeps that support runtime-neutral
+                // and matches the timer already used for idle-pool eviction.
+                builder.timer(AsyncIoTimer);
+                builder
+            },
             executor,
             pool_config: pool::Config {
                 idle_timeout: Some(Duration::from_secs(90)),
@@ -852,6 +985,14 @@ impl Builder {
         } else {
             PoolProtocol::Auto
         };
+        self
+    }
+
+    /// Applies stable HTTP/2 client settings without exposing Hyper's builder
+    /// as part of h12tiny's public API.
+    #[cfg(feature = "http2")]
+    pub fn http2_settings(&mut self, settings: Http2Settings) -> &mut Self {
+        settings.apply(&mut self.h2_builder);
         self
     }
 

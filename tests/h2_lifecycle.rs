@@ -10,7 +10,7 @@ use std::time::Duration;
 use async_net::TcpListener;
 use futures_channel::oneshot;
 use futures_util::future;
-use h12tiny::client::{Client, ErrorKind};
+use h12tiny::client::{Client, ErrorKind, Http2Settings};
 use h12tiny::io::FuturesIo;
 use h12tiny::runtime::BoxExecutor;
 use h12tiny::server::conn::auto;
@@ -70,6 +70,18 @@ fn cancelling_one_h2_response_future_does_not_poison_the_shared_session() {
 
         let mut builder = Client::builder(SmolExecutor);
         builder.http2_only(true);
+        builder.http2_settings(
+            Http2Settings::new()
+                .initial_stream_window_size(1_024)
+                .initial_connection_window_size(1_024)
+                .adaptive_window(false)
+                .max_frame_size(16_384)
+                .max_header_list_size(8_192)
+                .header_table_size(0)
+                .keep_alive_interval(Duration::from_secs(1))
+                .keep_alive_timeout(Duration::from_secs(1))
+                .keep_alive_while_idle(true),
+        );
         let client = builder.build::<FullBody>();
         let warm = client
             .request(
