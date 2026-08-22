@@ -81,9 +81,12 @@ other protocols, and HTTP/2 extended CONNECT is not implemented.
 TLS uses `rustls` with the pure-Rust Graviola provider from
 `rustls-graviola`. No `ring`, `aws-lc-rs`, OpenSSL, or
 native-tls backend is enabled. The built-in client selects Graviola explicitly.
-Applications that construct their own `rustls::ClientConfig` or
-`rustls::ServerConfig` should select the same provider explicitly (or install
-it once at startup):
+`h12tiny_client::ClientTlsConfigBuilder` exposes those same defaults for
+custom root stores, mutual TLS, and ALPN, without installing or consulting a
+process-global Rustls provider or disabling an embedding application's default
+provider. Applications that construct their own
+`rustls::ClientConfig` or `rustls::ServerConfig` should likewise select a
+provider per configuration:
 
 ```rust,no_run
 let provider = std::sync::Arc::new(rustls_graviola::default_provider());

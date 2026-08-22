@@ -29,6 +29,8 @@ use h12tiny_core::runtime::{AsyncIoTimer, BoxExecutor, BoxSendFuture};
 pub use connect::{
     Connected, ConnectionIo, Connector, ConnectorBuilder, DialError, DialFuture, Dialer,
 };
+#[cfg(feature = "tls")]
+pub use connect::ClientTlsConfigBuilder;
 
 /// Errors are deliberately classified by the endpoint layer rather than
 /// exposing connector/protocol implementation types in the public contract.

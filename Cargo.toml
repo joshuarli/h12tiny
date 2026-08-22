@@ -30,7 +30,11 @@ http = "1"
 http-body = "1"
 hyper = { package = "laputa-hyper-futures-lite", version = "1.11", default-features = false }
 pin-project-lite = "0.2"
-rustls = { version = "0.23", default-features = false, features = ["custom-provider", "std", "tls12"] }
+# h12tiny builds every TLS config with `builder_with_provider`, selecting
+# Graviola explicitly. Do not enable Rustls' `custom-provider` feature: Cargo
+# feature unification would otherwise disable another library's unambiguous
+# ring or aws-lc-rs default in the same process.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 rustls-graviola = { version = "0.4", default-features = false }
 webpki-roots = "1"
 

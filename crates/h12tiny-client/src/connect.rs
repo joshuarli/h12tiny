@@ -187,6 +187,133 @@ pub struct ConnectorBuilder {
     connector: Connector,
 }
 
+/// Builds a Rustls client configuration without relying on Rustls' process
+/// global provider selection.
+///
+/// [`ClientTlsConfigBuilder::new`] uses h12tiny's Graviola provider, the
+/// WebPKI roots, no client certificate, and ALPN offerings for HTTP/2 then
+/// HTTP/1.1. Callers can replace the root store, ALPN list, or client
+/// authentication while retaining that explicit provider. Applications with a
+/// different Rustls provider can use [`ClientTlsConfigBuilder::with_provider`]
+/// instead; this is useful when several Rustls consumers share one process.
+///
+/// For policies requiring a custom verifier or other Rustls-only settings,
+/// construct a [`rustls::ClientConfig`] directly and pass it to
+/// [`Connector::with_tls_config`] or [`ConnectorBuilder::tls_config`].
+#[cfg(feature = "tls")]
+pub struct ClientTlsConfigBuilder {
+    provider: Arc<rustls::crypto::CryptoProvider>,
+    roots: rustls::RootCertStore,
+    alpn_protocols: Vec<Vec<u8>>,
+    client_auth: ClientAuthentication,
+}
+
+#[cfg(feature = "tls")]
+enum ClientAuthentication {
+    None,
+    Certificates {
+        certificate_chain: Vec<rustls::pki_types::CertificateDer<'static>>,
+        private_key: rustls::pki_types::PrivateKeyDer<'static>,
+    },
+}
+
+#[cfg(feature = "tls")]
+impl ClientTlsConfigBuilder {
+    /// Starts with h12tiny's explicit Graviola provider and standard HTTPS
+    /// client defaults.
+    pub fn new() -> Self {
+        Self::with_provider(Arc::new(rustls_graviola::default_provider()))
+    }
+
+    /// Starts with an explicitly supplied Rustls provider.
+    ///
+    /// [`Self::build`] returns any compatibility error, for example when the
+    /// provider cannot support Rustls' safe default protocol versions. This
+    /// method never installs or reads Rustls' process-global provider.
+    pub fn with_provider(provider: Arc<rustls::crypto::CryptoProvider>) -> Self {
+        Self {
+            provider,
+            roots: rustls::RootCertStore::from_iter(
+                webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+            ),
+            alpn_protocols: vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+            client_auth: ClientAuthentication::None,
+        }
+    }
+
+    /// Replaces the trust store used for server certificate validation.
+    pub fn root_certificates(mut self, roots: rustls::RootCertStore) -> Self {
+        self.roots = roots;
+        self
+    }
+
+    /// Adds one trust anchor to the existing trust store.
+    pub fn add_root_certificate(
+        mut self,
+        certificate: rustls::pki_types::CertificateDer<'static>,
+    ) -> Result<Self, rustls::Error> {
+        self.roots.add(certificate)?;
+        Ok(self)
+    }
+
+    /// Replaces the ALPN protocol offerings sent during TLS negotiation.
+    ///
+    /// The default offers HTTP/2 followed by HTTP/1.1. Supplying an empty
+    /// list deliberately disables ALPN negotiation.
+    pub fn alpn_protocols(
+        mut self,
+        protocols: impl IntoIterator<Item = Vec<u8>>,
+    ) -> Self {
+        self.alpn_protocols = protocols.into_iter().collect();
+        self
+    }
+
+    /// Configures no TLS client authentication, which is the default.
+    pub fn no_client_auth(mut self) -> Self {
+        self.client_auth = ClientAuthentication::None;
+        self
+    }
+
+    /// Configures a certificate chain and private key for mutual TLS.
+    pub fn client_auth(
+        mut self,
+        certificate_chain: Vec<rustls::pki_types::CertificateDer<'static>>,
+        private_key: rustls::pki_types::PrivateKeyDer<'static>,
+    ) -> Self {
+        self.client_auth = ClientAuthentication::Certificates {
+            certificate_chain,
+            private_key,
+        };
+        self
+    }
+
+    /// Finishes the Rustls configuration.
+    pub fn build(self) -> Result<rustls::ClientConfig, rustls::Error> {
+        let builder = rustls::ClientConfig::builder_with_provider(self.provider)
+            .with_safe_default_protocol_versions()?;
+        let mut config = match self.client_auth {
+            ClientAuthentication::None => builder
+                .with_root_certificates(self.roots)
+                .with_no_client_auth(),
+            ClientAuthentication::Certificates {
+                certificate_chain,
+                private_key,
+            } => builder
+                .with_root_certificates(self.roots)
+                .with_client_auth_cert(certificate_chain, private_key)?,
+        };
+        config.alpn_protocols = self.alpn_protocols;
+        Ok(config)
+    }
+}
+
+#[cfg(feature = "tls")]
+impl Default for ClientTlsConfigBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Default for Connector {
     fn default() -> Self {
         #[cfg(feature = "tls")]
@@ -237,6 +364,18 @@ impl Connector {
             timer: Arc::new(AsyncIoTimer),
             tls: futures_rustls::TlsConnector::from(std::sync::Arc::new(config)),
         }
+    }
+
+    /// Uses h12tiny's standard TLS policy with an explicitly supplied Rustls
+    /// provider. This does not install or consult Rustls' process-global
+    /// provider selection.
+    #[cfg(feature = "tls")]
+    pub fn with_tls_provider(
+        provider: Arc<rustls::crypto::CryptoProvider>,
+    ) -> Result<Self, rustls::Error> {
+        ClientTlsConfigBuilder::with_provider(provider)
+            .build()
+            .map(Self::with_tls_config)
     }
 
     pub(crate) async fn connect(&self, uri: Uri, require_h2: bool) -> Result<Connected, Error> {
@@ -386,6 +525,19 @@ impl ConnectorBuilder {
         self
     }
 
+    /// Uses h12tiny's standard TLS policy with an explicitly supplied Rustls
+    /// provider. This does not install or consult Rustls' process-global
+    /// provider selection.
+    #[cfg(feature = "tls")]
+    pub fn tls_provider(
+        self,
+        provider: Arc<rustls::crypto::CryptoProvider>,
+    ) -> Result<Self, rustls::Error> {
+        ClientTlsConfigBuilder::with_provider(provider)
+            .build()
+            .map(|config| self.tls_config(config))
+    }
+
     /// Finalizes the connector policy.
     pub fn build(self) -> Connector {
         self.connector
@@ -394,18 +546,9 @@ impl ConnectorBuilder {
 
 #[cfg(feature = "tls")]
 fn default_tls_config() -> rustls::ClientConfig {
-    let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    // h12tiny selects the provider it was compiled to use instead of relying on
-    // Rustls' process-global provider choice. The connector's TLS policy stays
-    // local and explicit, while Graviola supplies all cryptographic operations.
-    let provider = std::sync::Arc::new(rustls_graviola::default_provider());
-    let mut config = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
+    ClientTlsConfigBuilder::new()
+        .build()
         .expect("Graviola supports Rustls' safe default protocol versions")
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    config
 }
 
 #[cfg(test)]
@@ -415,6 +558,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{Connector, DialFuture, Dialer, Error};
+    #[cfg(feature = "tls")]
+    use super::ClientTlsConfigBuilder;
     use http::Uri;
 
     #[derive(Clone, Default)]
@@ -479,5 +624,27 @@ mod tests {
             super::default_tls_config().alpn_protocols,
             vec![b"h2".to_vec(), b"http/1.1".to_vec()]
         );
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn tls_builder_constructs_an_explicit_graviola_config() {
+        let config = ClientTlsConfigBuilder::new()
+            .alpn_protocols([b"http/1.1".to_vec()])
+            .build()
+            .unwrap();
+
+        assert_eq!(config.alpn_protocols, vec![b"http/1.1".to_vec()]);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn tls_builder_accepts_an_explicit_provider() {
+        let provider = Arc::new(rustls_graviola::default_provider());
+        let config = ClientTlsConfigBuilder::with_provider(provider)
+            .build()
+            .unwrap();
+
+        assert_eq!(config.alpn_protocols, vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
     }
 }
