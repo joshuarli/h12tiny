@@ -27,6 +27,8 @@ use self::normalize::PoolKey;
 use self::pool::{CheckoutError, Poolable, Protocol as PoolProtocol, Reservation};
 use h12tiny_core::runtime::{AsyncIoTimer, BoxExecutor, BoxSendFuture};
 
+/// Futures-I/O traits accepted by [`TcpDialer`] streams.
+pub use futures_io::{AsyncRead, AsyncWrite};
 pub use connect::{
     Connected, ConnectionIo, Connector, ConnectorBuilder, DialError, DialFuture, Dialer,
     TcpConnected, TcpConnectionIo, TcpDialFuture, TcpDialer,
