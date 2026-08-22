@@ -11,7 +11,7 @@ use h12tiny::io::FuturesIo;
 use h12tiny::runtime::{BoxExecutor, BoxSendFuture};
 use h12tiny::server::conn::auto;
 use h12tiny::util;
-use h12tiny::web::{get, HttpUpgrade, Router};
+use h12tiny::web::{HttpUpgrade, Router, get};
 use http::Response;
 use hyper::rt::{Read, ReadBuf, Write};
 use std::pin::Pin;
@@ -111,9 +111,11 @@ fn web_http_upgrade_composes_with_the_raw_server_upgrade() {
             received.starts_with(b"HTTP/1.1 101"),
             "response: {received:?}"
         );
-        assert!(received
-            .windows(b"web-echo".len())
-            .any(|window| window == b"web-echo"));
+        assert!(
+            received
+                .windows(b"web-echo".len())
+                .any(|window| window == b"web-echo")
+        );
     });
 
     server.join().unwrap();

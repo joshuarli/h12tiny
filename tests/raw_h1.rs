@@ -156,12 +156,16 @@ fn sequential_h1_requests_reuse_one_direct_connection() {
             Either::Left((requests, _)) => requests,
             Either::Right(_) => panic!("second request did not reuse the open HTTP/1 connection"),
         };
-        assert!(std::str::from_utf8(&first)
-            .unwrap()
-            .starts_with("GET /one HTTP/1.1"));
-        assert!(std::str::from_utf8(&second)
-            .unwrap()
-            .starts_with("GET /two HTTP/1.1"));
+        assert!(
+            std::str::from_utf8(&first)
+                .unwrap()
+                .starts_with("GET /one HTTP/1.1")
+        );
+        assert!(
+            std::str::from_utf8(&second)
+                .unwrap()
+                .starts_with("GET /two HTTP/1.1")
+        );
     });
 }
 
@@ -393,8 +397,10 @@ fn cancelling_h1_request_closes_that_session_before_a_later_request() {
             Either::Left((request, _)) => request,
             Either::Right(_) => panic!("later request did not reconnect after H1 cancellation"),
         };
-        assert!(String::from_utf8(request)
-            .unwrap()
-            .starts_with("GET /later HTTP/1.1"));
+        assert!(
+            String::from_utf8(request)
+                .unwrap()
+                .starts_with("GET /later HTTP/1.1")
+        );
     });
 }

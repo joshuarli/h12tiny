@@ -14,7 +14,7 @@ use h12tiny::io::FuturesIo;
 use h12tiny::runtime::BoxExecutor;
 use h12tiny::server::conn::auto;
 use h12tiny::util::{self, BoxBody, ResponseBodyExt};
-use h12tiny::web::{get, Router};
+use h12tiny::web::{Router, get};
 use http::{Request, StatusCode};
 use support::SmolExecutor;
 

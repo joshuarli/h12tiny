@@ -27,14 +27,14 @@ use self::normalize::PoolKey;
 use self::pool::{CheckoutError, Poolable, Protocol as PoolProtocol, Reservation};
 use h12tiny_core::runtime::{AsyncIoTimer, BoxExecutor, BoxSendFuture};
 
-/// Futures-I/O traits accepted by [`TcpDialer`] streams.
-pub use futures_io::{AsyncRead, AsyncWrite};
+#[cfg(feature = "tls")]
+pub use connect::ClientTlsConfigBuilder;
 pub use connect::{
     Connected, ConnectionIo, Connector, ConnectorBuilder, DialError, DialFuture, Dialer,
     TcpConnected, TcpConnectionIo, TcpDialFuture, TcpDialer,
 };
-#[cfg(feature = "tls")]
-pub use connect::ClientTlsConfigBuilder;
+/// Futures-I/O traits accepted by [`TcpDialer`] streams.
+pub use futures_io::{AsyncRead, AsyncWrite};
 
 /// Errors are deliberately classified by the endpoint layer rather than
 /// exposing connector/protocol implementation types in the public contract.

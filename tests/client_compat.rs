@@ -13,14 +13,14 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
 };
 
 use async_net::TcpListener;
 use bytes::Bytes;
 use futures_rustls::TlsAcceptor;
-use futures_util::{stream, StreamExt};
+use futures_util::{StreamExt, stream};
 use h12tiny::client::{Client, ClientTlsConfigBuilder, Connector};
 use h12tiny::io::FuturesIo;
 use h12tiny::runtime::BoxExecutor;
@@ -412,12 +412,10 @@ fn client_tls_builder_uses_client_certificate_custom_root_and_protocol_policy() 
             .add(certificate.clone())
             .expect("fixture certificate is a valid server root");
         let provider = Arc::new(rustls_graviola::default_provider());
-        let verifier = WebPkiClientVerifier::builder_with_provider(
-            Arc::new(server_roots),
-            provider.clone(),
-        )
-        .build()
-        .expect("fixture client root builds a verifier");
+        let verifier =
+            WebPkiClientVerifier::builder_with_provider(Arc::new(server_roots), provider.clone())
+                .build()
+                .expect("fixture client root builds a verifier");
         let server_key = PrivateKeyDer::try_from(include_bytes!("fixtures/tls/key.der").to_vec())
             .expect("fixture key is valid DER");
         let mut server_config = rustls::ServerConfig::builder_with_provider(provider)

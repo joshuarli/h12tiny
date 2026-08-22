@@ -3,7 +3,7 @@
 mod support;
 
 use std::convert::Infallible;
-use std::future::{ready, Ready};
+use std::future::{Ready, ready};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -50,7 +50,7 @@ impl SocketPath {
                 Ok(()) => {
                     return Ok(Self {
                         path: directory.join("server.sock"),
-                    })
+                    });
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(error),

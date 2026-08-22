@@ -3,8 +3,8 @@
 use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 use std::task::{Context, Poll};
 

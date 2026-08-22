@@ -1,11 +1,11 @@
 #![cfg(all(feature = "client", feature = "server", feature = "http2"))]
 
 use std::convert::Infallible;
-use std::future::{ready, Ready};
+use std::future::{Ready, ready};
 use std::pin::Pin;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 use std::task::{Context, Poll};
 use std::time::Duration;

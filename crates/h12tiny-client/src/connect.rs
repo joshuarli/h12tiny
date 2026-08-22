@@ -47,10 +47,7 @@ type BoxedIo = Box<dyn ConnectionIo>;
 /// retained ownership of TLS, ALPN, and HTTP protocol selection.
 pub trait TcpConnectionIo: futures_io::AsyncRead + futures_io::AsyncWrite + Send + Unpin {}
 
-impl<T> TcpConnectionIo for T where
-    T: futures_io::AsyncRead + futures_io::AsyncWrite + Send + Unpin
-{
-}
+impl<T> TcpConnectionIo for T where T: futures_io::AsyncRead + futures_io::AsyncWrite + Send + Unpin {}
 
 type BoxedTcpIo = Box<dyn TcpConnectionIo>;
 
@@ -314,9 +311,7 @@ impl ClientTlsConfigBuilder {
     pub fn with_provider(provider: Arc<rustls::crypto::CryptoProvider>) -> Self {
         Self {
             provider,
-            roots: rustls::RootCertStore::from_iter(
-                webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
-            ),
+            roots: rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
             alpn_protocols: vec![b"h2".to_vec(), b"http/1.1".to_vec()],
             protocol_versions: None,
             client_auth: ClientAuthentication::None,
@@ -342,10 +337,7 @@ impl ClientTlsConfigBuilder {
     ///
     /// The default offers HTTP/2 followed by HTTP/1.1. Supplying an empty
     /// list deliberately disables ALPN negotiation.
-    pub fn alpn_protocols(
-        mut self,
-        protocols: impl IntoIterator<Item = Vec<u8>>,
-    ) -> Self {
+    pub fn alpn_protocols(mut self, protocols: impl IntoIterator<Item = Vec<u8>>) -> Self {
         self.alpn_protocols = protocols.into_iter().collect();
         self
     }
@@ -563,12 +555,7 @@ impl Connector {
                 .with_addresses(local_addr, peer_addr))
             }
             "https" => {
-                self.connect_tls(
-                    host,
-                    uri.port_u16().unwrap_or(443),
-                    require_h2,
-                    tcp,
-                )
+                self.connect_tls(host, uri.port_u16().unwrap_or(443), require_h2, tcp)
                     .await
             }
             other => Err(Error::UnsupportedScheme(other.to_owned())),
@@ -598,9 +585,7 @@ impl Connector {
         } = tcp;
         let server_name = futures_rustls::pki_types::ServerName::try_from(host.clone())
             .map_err(|_| Error::InvalidServerName(host))?;
-        let tls = self
-            .tls
-            .clone();
+        let tls = self.tls.clone();
         let tls = futures_rustls::TlsConnector::from(tls)
             .connect(server_name, io)
             .await
@@ -650,7 +635,10 @@ async fn connect_tcp(host: &str, port: u16) -> io::Result<Async<StdTcpStream>> {
 }
 
 fn socket_addresses(stream: &Async<StdTcpStream>) -> (Option<SocketAddr>, Option<SocketAddr>) {
-    (stream.get_ref().local_addr().ok(), stream.get_ref().peer_addr().ok())
+    (
+        stream.get_ref().local_addr().ok(),
+        stream.get_ref().peer_addr().ok(),
+    )
 }
 
 impl ConnectorBuilder {
@@ -734,11 +722,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use super::{
-        Connector, DialFuture, Dialer, Error, TcpConnected, TcpDialFuture, TcpDialer,
-    };
     #[cfg(feature = "tls")]
     use super::ClientTlsConfigBuilder;
+    use super::{Connector, DialFuture, Dialer, Error, TcpConnected, TcpDialFuture, TcpDialer};
     use http::Uri;
 
     #[derive(Clone, Default)]
@@ -824,9 +810,8 @@ mod tests {
             .tcp_dialer(PendingTcpDialer)
             .connect_timeout(Duration::ZERO)
             .build();
-        let result = smol::block_on(
-            connector.connect("http://example.test/".parse().unwrap(), false),
-        );
+        let result =
+            smol::block_on(connector.connect("http://example.test/".parse().unwrap(), false));
         assert!(matches!(result, Err(Error::Timeout)));
     }
 
@@ -834,9 +819,8 @@ mod tests {
     fn tcp_dialer_is_not_called_for_an_unsupported_scheme() {
         let dialer = RecordingTcpDialer::default();
         let connector = Connector::with_tcp_dialer(dialer.clone());
-        let result = smol::block_on(
-            connector.connect("ftp://example.test/".parse().unwrap(), false),
-        );
+        let result =
+            smol::block_on(connector.connect("ftp://example.test/".parse().unwrap(), false));
 
         assert!(matches!(result, Err(Error::UnsupportedScheme(scheme)) if scheme == "ftp"));
         assert_eq!(dialer.0.load(Ordering::SeqCst), 0);
@@ -847,10 +831,9 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let connector = Connector::with_tcp_dialer(LocalTcpDialer);
-        let connected = smol::block_on(
-            connector.connect(format!("http://{address}/").parse().unwrap(), false),
-        )
-        .unwrap();
+        let connected =
+            smol::block_on(connector.connect(format!("http://{address}/").parse().unwrap(), false))
+                .unwrap();
 
         assert_eq!(connected.protocol, super::super::ConnectionProtocol::Http1);
     }
@@ -905,7 +888,10 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(config.alpn_protocols, vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
+        assert_eq!(
+            config.alpn_protocols,
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+        );
     }
 
     #[cfg(feature = "tls")]
@@ -916,6 +902,9 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(config.alpn_protocols, vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
+        assert_eq!(
+            config.alpn_protocols,
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+        );
     }
 }

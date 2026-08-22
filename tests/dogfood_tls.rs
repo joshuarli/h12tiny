@@ -18,9 +18,7 @@ use async_net::{TcpListener, TcpStream};
 use bytes::Bytes;
 use futures_rustls::TlsAcceptor;
 use futures_util::future::{self, Either};
-use h12tiny::client::{
-    Client, Connector, ErrorKind, TcpConnected, TcpDialFuture, TcpDialer,
-};
+use h12tiny::client::{Client, Connector, ErrorKind, TcpConnected, TcpDialFuture, TcpDialer};
 use h12tiny::runtime::BoxExecutor;
 use h12tiny::server::conn::auto;
 use http::header::CONTENT_LENGTH;
@@ -28,8 +26,8 @@ use http::{Request, Response, StatusCode};
 use hyper::body::Incoming;
 use hyper::service::Service;
 use support::{
-    collect, fixture_client_config, fixture_server_config, ConnectionCounters, FullBody,
-    SmolExecutor, YieldingBody,
+    ConnectionCounters, FullBody, SmolExecutor, YieldingBody, collect, fixture_client_config,
+    fixture_server_config,
 };
 
 #[derive(Clone)]
@@ -188,7 +186,10 @@ fn h1_only_tls_policy_selects_http11_when_fixture_offers_h2() {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(collect(response.into_body()).await, [b"echo:".as_slice(), body].concat());
+            assert_eq!(
+                collect(response.into_body()).await,
+                [b"echo:".as_slice(), body].concat()
+            );
         }
         drop(client);
         server.await;

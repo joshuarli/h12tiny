@@ -19,7 +19,7 @@ use http::header::CONTENT_LENGTH;
 use http::{Method, Request, Response, StatusCode};
 use hyper::body::Incoming;
 use hyper::service::Service;
-use support::{collect, ConnectionCounters, CounterSnapshot, SmolExecutor, YieldingBody};
+use support::{ConnectionCounters, CounterSnapshot, SmolExecutor, YieldingBody, collect};
 
 #[derive(Debug, PartialEq, Eq)]
 struct RequestRecord {

@@ -17,7 +17,7 @@ use h12tiny::server::conn::auto;
 use http::{Request, Response, StatusCode};
 use hyper::body::Incoming;
 use hyper::service::Service;
-use support::{collect, ConnectionCounters, CounterSnapshot, FullBody, SmolExecutor};
+use support::{ConnectionCounters, CounterSnapshot, FullBody, SmolExecutor, collect};
 
 #[derive(Clone)]
 struct DelayService {

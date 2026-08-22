@@ -15,7 +15,7 @@ use h12tiny::client::{Client, DebugEvent, DebugEventLog, ErrorKind};
 use http::{Request, Response, StatusCode};
 use hyper::body::Incoming;
 use hyper::service::Service;
-use support::{collect, ConnectionCounters, FullBody, SmolExecutor};
+use support::{ConnectionCounters, FullBody, SmolExecutor, collect};
 
 #[cfg(all(feature = "server", feature = "http2"))]
 #[derive(Clone)]
@@ -294,9 +294,11 @@ fn stale_idle_h1_socket_is_evicted_before_or_during_next_dispatch() {
         drop(replacement);
 
         let request = replacement_rx.await.unwrap();
-        assert!(String::from_utf8(request)
-            .unwrap()
-            .starts_with("GET /replacement HTTP/1.1"));
+        assert!(
+            String::from_utf8(request)
+                .unwrap()
+                .starts_with("GET /replacement HTTP/1.1")
+        );
 
         drop(client);
         server.await;

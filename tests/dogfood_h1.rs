@@ -1,7 +1,7 @@
 #![cfg(all(feature = "client", feature = "server", feature = "http1"))]
 
 use std::convert::Infallible;
-use std::future::{ready, Ready};
+use std::future::{Ready, ready};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -82,7 +82,10 @@ fn h1_client_and_auto_server_interoperate_over_plaintext() {
         assert_eq!(first.status(), StatusCode::OK);
         let first_info = *ResponseInfo::from_response(&first).unwrap();
         assert!(!first_info.reused());
-        assert_eq!(first_info.connection().protocol(), ConnectionProtocol::Http1);
+        assert_eq!(
+            first_info.connection().protocol(),
+            ConnectionProtocol::Http1
+        );
         assert_eq!(first_info.connection().peer_addr(), Some(address));
         assert!(first_info.connection().local_addr().is_some());
         assert!(first_info.connection().connect_duration().is_some());

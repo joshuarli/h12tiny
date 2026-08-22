@@ -6,7 +6,7 @@
 //! service makes their response body and application work identical.
 
 use std::convert::Infallible;
-use std::future::{ready, Ready};
+use std::future::{Ready, ready};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 

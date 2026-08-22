@@ -19,7 +19,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use h12tiny_client_normalize::{extract_origin, normalize_http1_request, Origin};
-use http::header::{CONTENT_LENGTH, CONNECTION, TRANSFER_ENCODING};
+use http::header::{CONNECTION, CONTENT_LENGTH, TRANSFER_ENCODING};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Version};
 
 const MAX_RESPONSE_HEAD_BYTES: usize = 64 * 1024;
@@ -234,9 +234,7 @@ impl ClientTlsConfigBuilder {
     pub fn with_provider(provider: std::sync::Arc<rustls::crypto::CryptoProvider>) -> Self {
         Self {
             provider,
-            roots: rustls::RootCertStore::from_iter(
-                webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
-            ),
+            roots: rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
             protocol_versions: None,
             client_auth: ClientAuthentication::None,
         }
@@ -549,7 +547,9 @@ impl ResponseBody {
                 continue;
             }
 
-            let wanted = output.len().min(usize::try_from(remaining).unwrap_or(usize::MAX));
+            let wanted = output
+                .len()
+                .min(usize::try_from(remaining).unwrap_or(usize::MAX));
             let read = self.read_buffered(&mut output[..wanted])?;
             if read == 0 {
                 return Err(io::Error::new(
@@ -579,7 +579,9 @@ impl Read for ResponseBody {
                 if remaining == 0 {
                     return Ok(0);
                 }
-                let wanted = output.len().min(usize::try_from(remaining).unwrap_or(usize::MAX));
+                let wanted = output
+                    .len()
+                    .min(usize::try_from(remaining).unwrap_or(usize::MAX));
                 let read = self.read_buffered(&mut output[..wanted])?;
                 if read == 0 {
                     return Err(io::Error::new(
@@ -599,7 +601,9 @@ impl Read for ResponseBody {
 
 impl fmt::Debug for ResponseBody {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("ResponseBody").finish_non_exhaustive()
+        formatter
+            .debug_struct("ResponseBody")
+            .finish_non_exhaustive()
     }
 }
 
@@ -699,7 +703,8 @@ fn connect_tcp(host: &str, port: u16, timeout: Option<Duration>) -> io::Result<T
 
 fn write_request(connection: &mut Connection, request: Request<Vec<u8>>) -> Result<(), Error> {
     let (mut parts, body) = request.into_parts();
-    if !parts.headers.contains_key(CONTENT_LENGTH) && !parts.headers.contains_key(TRANSFER_ENCODING) {
+    if !parts.headers.contains_key(CONTENT_LENGTH) && !parts.headers.contains_key(TRANSFER_ENCODING)
+    {
         let value = HeaderValue::from_str(&body.len().to_string())
             .expect("the decimal length of a Vec is a valid HTTP header value");
         parts.headers.insert(CONTENT_LENGTH, value);
@@ -707,7 +712,9 @@ fn write_request(connection: &mut Connection, request: Request<Vec<u8>>) -> Resu
     // The client has no idle pool. State this explicitly so a server can
     // terminate close-delimited responses and body drop never strands a peer.
     if !parts.headers.contains_key(CONNECTION) {
-        parts.headers.insert(CONNECTION, HeaderValue::from_static("close"));
+        parts
+            .headers
+            .insert(CONNECTION, HeaderValue::from_static("close"));
     }
 
     write!(connection, "{} {} HTTP/1.1\r\n", parts.method, parts.uri)
@@ -764,14 +771,18 @@ fn read_response_head(connection: &mut Connection, buffered: &mut Vec<u8>) -> Re
             return Ok(end);
         }
         if buffered.len() >= MAX_RESPONSE_HEAD_BYTES {
-            return Err(response_error("HTTP response headers exceed the configured limit"));
+            return Err(response_error(
+                "HTTP response headers exceed the configured limit",
+            ));
         }
         let mut input = [0_u8; 4096];
         let read = connection
             .read(&mut input)
             .map_err(|error| Error::from_io(ErrorKind::Response, error))?;
         if read == 0 {
-            return Err(response_error("connection closed before HTTP response headers"));
+            return Err(response_error(
+                "connection closed before HTTP response headers",
+            ));
         }
         buffered.extend_from_slice(&input[..read]);
     }
@@ -804,7 +815,9 @@ fn parse_response_head(head: &[u8]) -> Result<(StatusCode, Version, HeaderMap), 
     for line in lines {
         let line = strip_line_crlf(line)?;
         if line.is_empty() {
-            return Err(response_error("unexpected empty line in HTTP response headers"));
+            return Err(response_error(
+                "unexpected empty line in HTTP response headers",
+            ));
         }
         let separator = line
             .iter()
@@ -823,7 +836,9 @@ fn parse_response_head(head: &[u8]) -> Result<(StatusCode, Version, HeaderMap), 
 fn strip_line_crlf(line: &[u8]) -> Result<&[u8], Error> {
     let line = line.strip_suffix(b"\r").unwrap_or(line);
     if line.contains(&b'\r') {
-        return Err(response_error("HTTP response header was not CRLF terminated"));
+        return Err(response_error(
+            "HTTP response header was not CRLF terminated",
+        ));
     }
     Ok(line)
 }
@@ -833,7 +848,11 @@ fn response_body_mode(
     status: StatusCode,
     head_request: bool,
 ) -> Result<BodyMode, Error> {
-    if head_request || status.is_informational() || status == StatusCode::NO_CONTENT || status == StatusCode::NOT_MODIFIED {
+    if head_request
+        || status.is_informational()
+        || status == StatusCode::NO_CONTENT
+        || status == StatusCode::NOT_MODIFIED
+    {
         return Ok(BodyMode::Empty);
     }
     let transfer_codings = headers
@@ -867,7 +886,9 @@ fn response_body_mode(
             .map_err(|_| response_error("HTTP Content-Length was invalid"))?;
         match content_length {
             Some(previous) if previous != value => {
-                return Err(response_error("HTTP response has conflicting Content-Length values"))
+                return Err(response_error(
+                    "HTTP response has conflicting Content-Length values",
+                ))
             }
             _ => content_length = Some(value),
         }
@@ -898,12 +919,10 @@ fn trim_ows(mut bytes: &[u8]) -> &[u8] {
 
 fn parse_chunk_size(line: &[u8]) -> io::Result<u64> {
     let size = line.split(|byte| *byte == b';').next().unwrap_or_default();
-    let size = std::str::from_utf8(trim_ows(size)).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "HTTP chunk size was not ASCII")
-    })?;
-    u64::from_str_radix(size, 16).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "HTTP chunk size was invalid")
-    })
+    let size = std::str::from_utf8(trim_ows(size))
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "HTTP chunk size was not ASCII"))?;
+    u64::from_str_radix(size, 16)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "HTTP chunk size was invalid"))
 }
 
 fn response_error(message: &'static str) -> Error {
@@ -914,7 +933,10 @@ fn response_error(message: &'static str) -> Error {
 }
 
 fn is_timeout(error: &io::Error) -> bool {
-    matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock)
+    matches!(
+        error.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    )
 }
 
 #[cfg(feature = "tls")]
@@ -996,7 +1018,9 @@ mod tests {
         response.body_mut().read_to_end(&mut body).unwrap();
         assert_eq!(body, b"first second");
 
-        let request = request_received.recv_timeout(Duration::from_secs(1)).unwrap();
+        let request = request_received
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
         let request = std::str::from_utf8(&request).unwrap();
         assert!(request.starts_with("GET /catalog?available=true HTTP/1.1\r\n"));
         let request_lower = request.to_ascii_lowercase();

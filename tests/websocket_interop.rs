@@ -12,7 +12,7 @@ use h12tiny::io::FuturesIo;
 use h12tiny::runtime::{BoxExecutor, BoxSendFuture};
 use h12tiny::server::conn::auto;
 use h12tiny::util;
-use h12tiny::web::{get, Router, WebSocketFrame, WebSocketOpCode, WebSocketUpgrade};
+use h12tiny::web::{Router, WebSocketFrame, WebSocketOpCode, WebSocketUpgrade, get};
 use http::Response;
 
 #[derive(Clone, Copy, Debug)]

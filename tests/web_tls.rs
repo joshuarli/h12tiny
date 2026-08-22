@@ -18,9 +18,9 @@ use h12tiny::client::{Client, Connector};
 use h12tiny::runtime::BoxExecutor;
 use h12tiny::server::serve_tls;
 use h12tiny::util::{self, BoxBody, ResponseBodyExt};
-use h12tiny::web::{get, Router};
+use h12tiny::web::{Router, get};
 use http::{Request, StatusCode};
-use support::{fixture_client_config, fixture_server_config, SmolExecutor};
+use support::{SmolExecutor, fixture_client_config, fixture_server_config};
 
 async fn serve_web_tls_once(http2: bool) -> (u16, oneshot::Sender<()>, smol::Task<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
