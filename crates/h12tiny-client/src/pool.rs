@@ -68,6 +68,9 @@ pub(crate) enum Reservation<T> {
 pub(crate) struct Config {
     pub(crate) idle_timeout: Option<Duration>,
     pub(crate) max_idle_per_host: usize,
+    /// Bounds every open H1 socket for an origin, including an in-progress
+    /// establishment and an idle socket retained for later reuse.
+    pub(crate) max_h1_connections_per_host: usize,
 }
 
 impl Config {
@@ -84,11 +87,13 @@ pub(crate) struct Pool<T, K: Key> {
 }
 
 struct Inner<T, K: Key> {
-    /// H2 has at most one establishment owner per origin. H1 deliberately
-    /// does not use this marker, so concurrent H1 work may open connections.
+    /// H2 has at most one establishment owner per origin. H1 reservations are
+    /// counted separately because each H1 socket is unique to one exchange.
     connecting: HashSet<K>,
+    h1_connections: HashMap<K, usize>,
     idle: HashMap<K, Vec<Idle<T>>>,
     max_idle_per_host: usize,
+    max_h1_connections_per_host: usize,
     waiters: HashMap<K, VecDeque<oneshot::Sender<T>>>,
     idle_interval_ref: Option<oneshot::Sender<Infallible>>,
     executor: BoxExecutor,
@@ -107,8 +112,10 @@ impl<T, K: Key> Pool<T, K> {
         let inner = config.enabled().then(|| {
             Arc::new(Mutex::new(Inner {
                 connecting: HashSet::new(),
+                h1_connections: HashMap::new(),
                 idle: HashMap::new(),
                 max_idle_per_host: config.max_idle_per_host,
+                max_h1_connections_per_host: config.max_h1_connections_per_host,
                 waiters: HashMap::new(),
                 idle_interval_ref: None,
                 executor,
@@ -142,25 +149,39 @@ impl<T: Poolable, K: Key> Pool<T, K> {
         }
     }
 
-    /// Acquires the H2 connecting marker. A marker is represented by a
-    /// `Connecting` drop guard, so cancellation before a handshake cannot
-    /// permanently poison the origin.
+    /// Acquires a connection-establishment reservation. H2 has one shared
+    /// establishment owner per origin; H1 consumes one bounded socket slot
+    /// that is retained until that connection is closed.
+    ///
+    /// A reservation is represented by a `Connecting` drop guard, so a
+    /// cancelled establishment cannot permanently consume a slot or strand
+    /// waiters.
     pub(crate) fn connecting(&self, key: &K, protocol: Protocol) -> Option<Connecting<T, K>> {
-        if protocol == Protocol::Http2 {
-            if let Some(inner) = &self.inner {
-                let mut locked = inner.lock().expect("pool mutex poisoned");
+        if let Some(inner) = &self.inner {
+            let mut locked = inner.lock().expect("pool mutex poisoned");
+            if protocol == Protocol::Http2 {
                 if !locked.connecting.insert(key.clone()) {
                     return None;
                 }
                 return Some(Connecting {
                     key: key.clone(),
                     pool: WeakOpt::downgrade(inner),
+                    h1_slot: false,
                 });
             }
+            if !locked.reserve_h1_slot(key) {
+                return None;
+            }
+            return Some(Connecting {
+                key: key.clone(),
+                pool: WeakOpt::downgrade(inner),
+                h1_slot: true,
+            });
         }
         Some(Connecting {
             key: key.clone(),
             pool: WeakOpt::none(),
+            h1_slot: false,
         })
     }
 
@@ -169,7 +190,7 @@ impl<T: Poolable, K: Key> Pool<T, K> {
         #[cfg_attr(not(feature = "http2"), allow(unused_mut))] mut connecting: Connecting<T, K>,
         value: T,
     ) -> Pooled<T, K> {
-        let (value, pool) = match &self.inner {
+        let (value, pool, h1_slot) = match &self.inner {
             Some(inner) => match value.reserve() {
                 #[cfg(feature = "http2")]
                 Reservation::Shared(to_insert, to_return) => {
@@ -184,23 +205,35 @@ impl<T: Poolable, K: Key> Pool<T, K> {
                         }
                     }
                     connecting.pool = WeakOpt::none();
-                    (to_return, WeakOpt::none())
+                    connecting.h1_slot = false;
+                    (to_return, WeakOpt::none(), false)
                 }
-                Reservation::Unique(value) => (value, WeakOpt::downgrade(inner)),
+                Reservation::Unique(value) => {
+                    let h1_slot = connecting.h1_slot;
+                    connecting.h1_slot = false;
+                    // The returned `Pooled` value now owns the H1 slot. Its
+                    // eventual drop will either hand the socket to a waiter
+                    // or release the slot; this establishment guard must not
+                    // wake those waiters as though the dial had failed.
+                    connecting.pool = WeakOpt::none();
+                    (value, WeakOpt::downgrade(inner), h1_slot)
+                }
             },
-            None => (value, WeakOpt::none()),
+            None => (value, WeakOpt::none(), false),
         };
         Pooled {
             value: Some(value),
             is_reused: false,
             key: connecting.key.clone(),
             pool,
+            h1_slot,
             debug_events: self.debug_events.clone(),
         }
     }
 
     fn reuse(&self, key: &K, value: T) -> Pooled<T, K> {
-        let pool = if value.can_share() {
+        let h1_slot = !value.can_share();
+        let pool = if !h1_slot {
             WeakOpt::none()
         } else {
             self.inner
@@ -212,6 +245,7 @@ impl<T: Poolable, K: Key> Pool<T, K> {
             is_reused: true,
             key: key.clone(),
             pool,
+            h1_slot,
             debug_events: self.debug_events.clone(),
         }
     }
@@ -329,11 +363,45 @@ impl<T: Poolable, K: Key> Inner<T, K> {
         }
     }
 
+    fn reserve_h1_slot(&mut self, key: &K) -> bool {
+        let connections = self.h1_connections.entry(key.clone()).or_default();
+        if *connections >= self.max_h1_connections_per_host {
+            return false;
+        }
+        *connections += 1;
+        true
+    }
+
+    fn release_h1_slot(&mut self, key: &K) {
+        let remove = self
+            .h1_connections
+            .get_mut(key)
+            .map(|connections| {
+                debug_assert!(*connections > 0, "H1 slot was released twice");
+                *connections = connections.saturating_sub(1);
+                *connections == 0
+            })
+            .unwrap_or(false);
+        if remove {
+            self.h1_connections.remove(key);
+        }
+    }
+
     /// Removes an establishment marker and wakes ownership waiters by
     /// dropping their senders. Their parent client futures then retry rather
     /// than remaining parked behind a cancelled connecting task.
+    #[cfg_attr(not(feature = "http2"), allow(dead_code))]
     fn connected(&mut self, key: &K) {
         self.connecting.remove(key);
+        self.waiters.remove(key);
+    }
+
+    fn connecting_cancelled(&mut self, key: &K, h1_slot: bool) {
+        if h1_slot {
+            self.release_h1_slot(key);
+        } else {
+            self.connecting.remove(key);
+        }
         self.waiters.remove(key);
     }
 
@@ -402,6 +470,7 @@ pub(crate) struct Pooled<T: Poolable, K: Key> {
     is_reused: bool,
     key: K,
     pool: WeakOpt<Mutex<Inner<T, K>>>,
+    h1_slot: bool,
     debug_events: Option<DebugEventLog>,
 }
 
@@ -435,6 +504,7 @@ impl<T: Poolable, K: Key> Drop for Pooled<T, K> {
             return;
         };
         if !value.is_open() {
+            self.release_h1_slot();
             if let Some(events) = &self.debug_events {
                 events.record(DebugEvent::ConnectionClosed {
                     origin: self.key.origin(),
@@ -450,6 +520,22 @@ impl<T: Poolable, K: Key> Drop for Pooled<T, K> {
                             origin: self.key.origin(),
                         });
                     }
+                } else if self.h1_slot {
+                    inner.release_h1_slot(&self.key);
+                }
+            }
+        } else {
+            self.release_h1_slot();
+        }
+    }
+}
+
+impl<T: Poolable, K: Key> Pooled<T, K> {
+    fn release_h1_slot(&self) {
+        if self.h1_slot {
+            if let Some(pool) = self.pool.upgrade() {
+                if let Ok(mut inner) = pool.lock() {
+                    inner.release_h1_slot(&self.key);
                 }
             }
         }
@@ -577,14 +663,24 @@ impl<T: Poolable, K: Key> Drop for Checkout<T, K> {
 pub(crate) struct Connecting<T: Poolable, K: Key> {
     key: K,
     pool: WeakOpt<Mutex<Inner<T, K>>>,
+    h1_slot: bool,
 }
 
 impl<T: Poolable, K: Key> Connecting<T, K> {
-    /// An auto protocol connection that negotiated H2 must convert its marker
-    /// atomically. If another connection won, `None` asks the caller to wait
-    /// for the winner rather than stampeding another H2 session.
-    pub(crate) fn alpn_h2(self, pool: &Pool<T, K>) -> Option<Self> {
-        debug_assert!(self.pool.0.is_none());
+    /// An auto protocol connection that negotiated H2 releases its temporary
+    /// H1 slot and converts to the shared H2 marker atomically. If another
+    /// connection won, `None` asks the caller to wait for the winner rather
+    /// than stampeding another H2 session.
+    pub(crate) fn alpn_h2(mut self, pool: &Pool<T, K>) -> Option<Self> {
+        if self.h1_slot {
+            if let Some(inner) = self.pool.upgrade() {
+                if let Ok(mut inner) = inner.lock() {
+                    inner.release_h1_slot(&self.key);
+                }
+            }
+            self.h1_slot = false;
+        }
+        self.pool = WeakOpt::none();
         pool.connecting(&self.key, Protocol::Http2)
     }
 }
@@ -593,7 +689,7 @@ impl<T: Poolable, K: Key> Drop for Connecting<T, K> {
     fn drop(&mut self) {
         if let Some(pool) = self.pool.upgrade() {
             if let Ok(mut inner) = pool.lock() {
-                inner.connected(&self.key);
+                inner.connecting_cancelled(&self.key, self.h1_slot);
             }
         }
     }
@@ -728,6 +824,20 @@ mod tests {
             Config {
                 idle_timeout: None,
                 max_idle_per_host: 2,
+                max_h1_connections_per_host: usize::MAX,
+            },
+            BoxExecutor::new(Noop),
+            None,
+            None,
+        )
+    }
+
+    fn capped_h1_pool(max_h1_connections_per_host: usize) -> Pool<Unique, String> {
+        Pool::new(
+            Config {
+                idle_timeout: None,
+                max_idle_per_host: 2,
+                max_h1_connections_per_host,
             },
             BoxExecutor::new(Noop),
             None,
@@ -739,6 +849,7 @@ mod tests {
         Connecting {
             key,
             pool: WeakOpt::none(),
+            h1_slot: false,
         }
     }
 
@@ -821,6 +932,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn h1_connection_cap_includes_connecting_and_idle_connections() {
+        let pool = capped_h1_pool(1);
+        let key = "example.test".to_owned();
+        let connecting = pool.connecting(&key, Protocol::Http1).unwrap();
+        assert!(pool.connecting(&key, Protocol::Http1).is_none());
+
+        drop(pool.pooled(connecting, Unique(7)));
+        assert!(pool.connecting(&key, Protocol::Http1).is_none());
+
+        let checked_out = block_on(pool.checkout(key.clone())).unwrap();
+        assert_eq!(*checked_out, Unique(7));
+        drop(checked_out);
+        assert!(pool.connecting(&key, Protocol::Http1).is_none());
+    }
+
+    #[test]
+    fn established_h1_connection_is_returned_to_a_waiter_at_the_connection_cap() {
+        let pool = capped_h1_pool(1);
+        let key = "example.test".to_owned();
+        let connecting = pool.connecting(&key, Protocol::Http1).unwrap();
+        let mut checkout = pool.checkout(key);
+        assert!(poll_once(&mut checkout).is_pending());
+
+        drop(pool.pooled(connecting, Unique(7)));
+        let checked_out = match poll_once(&mut checkout) {
+            Poll::Ready(Ok(checked_out)) => checked_out,
+            _ => panic!("established H1 connection did not wake its waiter"),
+        };
+        assert_eq!(*checked_out, Unique(7));
+    }
+
+    #[test]
+    fn cancelled_h1_establishment_wakes_waiters_and_releases_its_slot() {
+        let pool = capped_h1_pool(1);
+        let key = "example.test".to_owned();
+        let owner = pool.connecting(&key, Protocol::Http1).unwrap();
+        let mut checkout = pool.checkout(key.clone());
+        assert!(poll_once(&mut checkout).is_pending());
+
+        drop(owner);
+        assert!(matches!(
+            poll_once(&mut checkout),
+            Poll::Ready(Err(CheckoutError::NoLongerWanted))
+        ));
+        assert!(pool.connecting(&key, Protocol::Http1).is_some());
+    }
+
     #[derive(Debug)]
     struct Closed;
 
@@ -844,19 +1003,15 @@ mod tests {
             Config {
                 idle_timeout: None,
                 max_idle_per_host: 2,
+                max_h1_connections_per_host: 1,
             },
             BoxExecutor::new(Noop),
             None,
             None,
         );
         let key = "example.test".to_owned();
-        drop(pool.pooled(
-            Connecting {
-                key: key.clone(),
-                pool: WeakOpt::none(),
-            },
-            Closed,
-        ));
+        let connecting = pool.connecting(&key, Protocol::Http1).unwrap();
+        drop(pool.pooled(connecting, Closed));
         assert!(!pool
             .inner
             .as_ref()
@@ -865,6 +1020,7 @@ mod tests {
             .unwrap()
             .idle
             .contains_key(&key));
+        assert!(pool.connecting(&key, Protocol::Http1).is_some());
     }
 
     #[test]
@@ -873,6 +1029,7 @@ mod tests {
             Config {
                 idle_timeout: Some(Duration::from_millis(1)),
                 max_idle_per_host: 2,
+                max_h1_connections_per_host: usize::MAX,
             },
             BoxExecutor::new(Noop),
             None,
@@ -900,6 +1057,7 @@ mod tests {
                 Config {
                     idle_timeout: Some(Duration::from_millis(1)),
                     max_idle_per_host: 2,
+                    max_h1_connections_per_host: usize::MAX,
                 },
                 BoxExecutor::new(SmolExecutor),
                 Some(std::sync::Arc::new(AsyncIoTimer)),
@@ -933,11 +1091,36 @@ mod tests {
 
     #[cfg(feature = "http2")]
     #[test]
+    fn auto_connection_releases_its_h1_slot_when_alpn_selects_h2() {
+        let pool = Pool::<Shared, String>::new(
+            Config {
+                idle_timeout: None,
+                max_idle_per_host: 2,
+                max_h1_connections_per_host: 1,
+            },
+            BoxExecutor::new(Noop),
+            None,
+            None,
+        );
+        let key = "example.test".to_owned();
+        let h2_connecting = pool
+            .connecting(&key, Protocol::Auto)
+            .unwrap()
+            .alpn_h2(&pool)
+            .unwrap();
+
+        assert!(pool.connecting(&key, Protocol::Http1).is_some());
+        drop(h2_connecting);
+    }
+
+    #[cfg(feature = "http2")]
+    #[test]
     fn shared_reservation_remains_available_while_an_h2_stream_is_checked_out() {
         let pool = Pool::<Shared, String>::new(
             Config {
                 idle_timeout: None,
                 max_idle_per_host: 2,
+                max_h1_connections_per_host: usize::MAX,
             },
             BoxExecutor::new(Noop),
             None,
@@ -947,6 +1130,7 @@ mod tests {
         let owner = Connecting {
             key: key.clone(),
             pool: WeakOpt::none(),
+            h1_slot: false,
         };
         let first = pool.pooled(owner, Shared(9));
         let second = block_on(pool.checkout(key)).unwrap();

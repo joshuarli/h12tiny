@@ -935,6 +935,7 @@ impl Builder {
             pool_config: pool::Config {
                 idle_timeout: Some(Duration::from_secs(90)),
                 max_idle_per_host: usize::MAX,
+                max_h1_connections_per_host: usize::MAX,
             },
             pool_timer: Some(Arc::new(AsyncIoTimer)),
             debug_events: None,
@@ -956,6 +957,22 @@ impl Builder {
 
     pub fn pool_max_idle_per_host(&mut self, max_idle: usize) -> &mut Self {
         self.pool_config.max_idle_per_host = max_idle;
+        self
+    }
+
+    /// Limits open HTTP/1.1 connections for each origin.
+    ///
+    /// The bound includes connecting, in-use, and idle HTTP/1.1 sockets, so
+    /// callers above the bound wait for a reusable connection instead of
+    /// creating another socket. HTTP/2 remains multiplexed and is unaffected.
+    /// Passing zero disables this additional bound; the default is unlimited.
+    /// The bound applies only while the idle pool is enabled.
+    pub fn pool_max_connections_per_host(&mut self, max_connections: usize) -> &mut Self {
+        self.pool_config.max_h1_connections_per_host = if max_connections == 0 {
+            usize::MAX
+        } else {
+            max_connections
+        };
         self
     }
 

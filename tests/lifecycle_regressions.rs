@@ -191,6 +191,73 @@ async fn read_head(stream: &mut async_net::TcpStream) -> Vec<u8> {
 
 #[cfg(feature = "http1")]
 #[test]
+fn h1_connection_limit_queues_same_origin_requests_without_opening_another_socket() {
+    smol::block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (first_received_tx, first_received_rx) = oneshot::channel();
+        let (release_first_tx, release_first_rx) = oneshot::channel();
+        let server = smol::spawn(async move {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let first = read_head(&mut connection).await;
+            assert!(first.starts_with(b"GET /one HTTP/1.1"));
+            first_received_tx.send(()).unwrap();
+
+            match future::select(
+                Box::pin(listener.accept()),
+                Box::pin(async_io::Timer::after(Duration::from_millis(25))),
+            )
+            .await
+            {
+                Either::Left(_) => panic!("second request opened another HTTP/1 connection"),
+                Either::Right(_) => {}
+            }
+
+            release_first_rx.await.unwrap();
+            connection
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            let second = read_head(&mut connection).await;
+            assert!(second.starts_with(b"GET /two HTTP/1.1"));
+            connection
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let mut builder = Client::builder(SmolExecutor);
+        builder.pool_max_connections_per_host(1);
+        let client = builder.build::<FullBody>();
+        let first = smol::spawn(client.clone().request(
+            Request::builder()
+                .uri(format!("http://{address}/one"))
+                .body(FullBody::empty())
+                .unwrap(),
+        ));
+        first_received_rx.await.unwrap();
+        let second = smol::spawn(client.clone().request(
+            Request::builder()
+                .uri(format!("http://{address}/two"))
+                .body(FullBody::empty())
+                .unwrap(),
+        ));
+
+        release_first_tx.send(()).unwrap();
+        let first = first.await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        drop(first);
+        let second = second.await.unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        drop(second);
+
+        drop(client);
+        server.await;
+    });
+}
+
+#[cfg(feature = "http1")]
+#[test]
 fn stale_idle_h1_socket_is_evicted_before_or_during_next_dispatch() {
     smol::block_on(async {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
