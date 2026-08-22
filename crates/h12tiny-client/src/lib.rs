@@ -31,7 +31,8 @@ use h12tiny_core::runtime::{AsyncIoTimer, BoxExecutor, BoxSendFuture};
 pub use connect::ClientTlsConfigBuilder;
 pub use connect::{
     Connected, ConnectionIo, Connector, ConnectorBuilder, DialError, DialFuture, Dialer,
-    TcpConnected, TcpConnectionIo, TcpDialFuture, TcpDialer,
+    ResolveFuture, Resolver, SystemResolver, TcpConnected, TcpConnectionIo, TcpDialFuture,
+    TcpDialer,
 };
 /// Futures-I/O traits accepted by [`TcpDialer`] streams.
 pub use futures_io::{AsyncRead, AsyncWrite};

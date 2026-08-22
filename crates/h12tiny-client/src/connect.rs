@@ -9,13 +9,14 @@
 //! The standard library resolver is synchronous, so name resolution can block
 //! the task that first polls a default connection. This is deliberate: the
 //! client does not create or depend on a process-global blocking worker pool.
-//! Applications that need asynchronous or otherwise specialized DNS should use
-//! [`Dialer`] to replace the complete establishment sequence.
+//! Applications that need asynchronous or otherwise specialized DNS can use
+//! [`Resolver`] while retaining h12tiny's TCP, TLS, ALPN, and pooling policy.
 
 use std::error::Error as StdError;
 use std::fmt;
 use std::future::Future;
 use std::io;
+use std::collections::VecDeque;
 use std::net::{SocketAddr, TcpStream as StdTcpStream, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -23,6 +24,7 @@ use std::time::Duration;
 
 use async_io::Async;
 use futures_util::future::{self, Either};
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use http::Uri;
 use hyper::rt::Timer;
 
@@ -151,6 +153,45 @@ pub trait Dialer: Send + Sync + 'static {
     fn connect(&self, origin: Uri, require_http2: bool) -> DialFuture;
 }
 
+/// Future returned by [`Resolver::resolve`].
+///
+/// Resolver failures retain their source error through connection
+/// establishment and are classified as [`super::ErrorKind::Connect`] by the
+/// client.
+pub type ResolveFuture =
+    Pin<Box<dyn Future<Output = Result<Vec<SocketAddr>, DialError>> + Send + 'static>>;
+
+/// Resolves one direct-origin host and port into candidate socket addresses.
+///
+/// h12tiny starts connection attempts in the returned order, interleaving
+/// IPv6 and IPv4 candidates and racing later candidates after the configured
+/// Happy Eyeballs delay. A resolver is used only by the default TCP path;
+/// [`Dialer`] and [`TcpDialer`] retain complete ownership of their own name
+/// resolution and socket policy.
+pub trait Resolver: Send + Sync + 'static {
+    fn resolve(&self, host: String, port: u16) -> ResolveFuture;
+}
+
+/// The default system resolver used by [`Connector`].
+///
+/// It delegates to [`ToSocketAddrs`], so its lookup is synchronous when first
+/// polled. Applications that need cancellation-aware DNS, an address cache,
+/// or a custom resolver should install [`Resolver`] through
+/// [`ConnectorBuilder::resolver`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemResolver;
+
+impl Resolver for SystemResolver {
+    fn resolve(&self, host: String, port: u16) -> ResolveFuture {
+        Box::pin(async move {
+            (host.as_str(), port)
+                .to_socket_addrs()
+                .map(Iterator::collect)
+                .map_err(|error| Box::new(error) as DialError)
+        })
+    }
+}
+
 /// Replaces only capability-aware TCP establishment.
 ///
 /// h12tiny receives the normalized absolute origin, while the caller retains
@@ -175,6 +216,7 @@ pub(crate) enum Error {
     #[cfg(feature = "tls")]
     RequiredHttp2NotNegotiated,
     Connect(std::io::Error),
+    Resolve(DialError),
     Custom(DialError),
     Timeout,
     #[cfg(feature = "tls")]
@@ -199,6 +241,7 @@ impl fmt::Display for Error {
                 f.write_str("HTTP/2 was required but ALPN did not select h2")
             }
             Self::Connect(error) => error.fmt(f),
+            Self::Resolve(error) => error.fmt(f),
             Self::Custom(error) => error.fmt(f),
             Self::Timeout => f.write_str("connection establishment timed out"),
             #[cfg(feature = "tls")]
@@ -211,6 +254,7 @@ impl StdError for Error {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
             Self::Connect(error) => Some(error),
+            Self::Resolve(error) => Some(error.as_ref()),
             Self::Custom(error) => Some(error.as_ref()),
             #[cfg(feature = "tls")]
             Self::Tls(error) => Some(error),
@@ -229,7 +273,11 @@ impl Error {
             Self::InvalidServerName(_) | Self::Tls(_) => super::ErrorKind::Tls,
             #[cfg(not(feature = "tls"))]
             Self::TlsDisabled => super::ErrorKind::Tls,
-            Self::MissingHost | Self::Connect(_) | Self::Custom(_) | Self::Timeout => {
+            Self::MissingHost
+            | Self::Connect(_)
+            | Self::Resolve(_)
+            | Self::Custom(_)
+            | Self::Timeout => {
                 super::ErrorKind::Connect
             }
         }
@@ -241,6 +289,8 @@ impl Error {
 #[derive(Clone)]
 pub struct Connector {
     kind: ConnectorKind,
+    resolver: Arc<dyn Resolver>,
+    happy_eyeballs_timeout: Option<Duration>,
     connect_timeout: Option<Duration>,
     timer: Arc<dyn Timer + Send + Sync>,
     #[cfg(feature = "tls")]
@@ -414,6 +464,8 @@ impl Default for Connector {
         {
             Self {
                 kind: ConnectorKind::Default,
+                resolver: Arc::new(SystemResolver),
+                happy_eyeballs_timeout: Some(Duration::from_millis(250)),
                 connect_timeout: None,
                 timer: Arc::new(AsyncIoTimer),
             }
@@ -452,6 +504,18 @@ impl Connector {
         Self::builder().tcp_dialer(dialer).build()
     }
 
+    /// Uses an asynchronous resolver while retaining h12tiny's TCP, TLS,
+    /// ALPN, protocol, and pooling policy.
+    ///
+    /// The resolver is consulted only by the default TCP path. Supplying a
+    /// [`Dialer`] or [`TcpDialer`] replaces that path and bypasses it.
+    pub fn with_resolver<R>(resolver: R) -> Self
+    where
+        R: Resolver,
+    {
+        Self::builder().resolver(resolver).build()
+    }
+
     #[cfg(feature = "tls")]
     pub(crate) fn force_http1(&mut self) {
         let mut config = (*self.tls).clone();
@@ -469,6 +533,8 @@ impl Connector {
     pub fn with_tls_config(config: rustls::ClientConfig) -> Self {
         Self {
             kind: ConnectorKind::Default,
+            resolver: Arc::new(SystemResolver),
+            happy_eyeballs_timeout: Some(Duration::from_millis(250)),
             connect_timeout: None,
             timer: Arc::new(AsyncIoTimer),
             tls: Arc::new(config),
@@ -532,9 +598,7 @@ impl Connector {
                 let tcp = match tcp {
                     Some(tcp) => tcp,
                     None => {
-                        let stream = connect_tcp(&host, uri.port_u16().unwrap_or(80))
-                            .await
-                            .map_err(Error::Connect)?;
+                        let stream = self.connect_tcp(&host, uri.port_u16().unwrap_or(80)).await?;
                         let (local_addr, peer_addr) = socket_addresses(&stream);
                         TcpConnected::new(stream).with_addresses(local_addr, peer_addr)
                     }
@@ -573,7 +637,7 @@ impl Connector {
         let tcp = match custom_tcp {
             Some(tcp) => tcp,
             None => {
-                let stream = connect_tcp(&host, port).await.map_err(Error::Connect)?;
+                let stream = self.connect_tcp(&host, port).await?;
                 let (local_addr, peer_addr) = socket_addresses(&stream);
                 TcpConnected::new(stream).with_addresses(local_addr, peer_addr)
             }
@@ -609,29 +673,112 @@ impl Connector {
     ) -> Result<Connected, Error> {
         Err(Error::TlsDisabled)
     }
+
+    async fn connect_tcp(&self, host: &str, port: u16) -> Result<Async<StdTcpStream>, Error> {
+        let addresses = self
+            .resolver
+            .resolve(host.to_owned(), port)
+            .await
+            .map_err(Error::Resolve)?;
+        connect_resolved_addresses(addresses, self.happy_eyeballs_timeout, self.timer.as_ref())
+            .await
+            .map_err(Error::Connect)
+    }
 }
 
-/// Resolves an origin synchronously, then establishes each candidate socket
-/// asynchronously until one succeeds. Keeping resolution here, rather than
-/// using `async-net`, avoids its process-global `blocking` worker pool while
-/// preserving async TCP connect and cancellation after resolution completes.
-async fn connect_tcp(host: &str, port: u16) -> io::Result<Async<StdTcpStream>> {
+/// Races resolved TCP candidates without committing the client to a runtime.
+///
+/// The first candidate starts immediately. Later candidates are launched
+/// after `happy_eyeballs_timeout`, or immediately after a failed attempt. The
+/// returned vector has already been family-interleaved so an address family
+/// that stalls cannot indefinitely delay the other family.
+async fn connect_resolved_addresses(
+    addresses: Vec<SocketAddr>,
+    happy_eyeballs_timeout: Option<Duration>,
+    timer: &(dyn Timer + Send + Sync),
+) -> io::Result<Async<StdTcpStream>> {
+    let addresses = interleave_address_families(addresses);
     let mut last_error = None;
-    let mut addresses = (host, port).to_socket_addrs()?;
 
-    while let Some(address) = addresses.next() {
-        match Async::<StdTcpStream>::connect(address).await {
+    if happy_eyeballs_timeout.is_none() {
+        for address in addresses {
+            match Async::<StdTcpStream>::connect(address).await {
+                Ok(stream) => return Ok(stream),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        return Err(no_connected_address(last_error));
+    }
+
+    let mut addresses = addresses.into_iter();
+    let Some(first) = addresses.next() else {
+        return Err(no_connected_address(None));
+    };
+    type Attempt = Pin<Box<dyn Future<Output = io::Result<Async<StdTcpStream>>> + Send>>;
+    let mut attempts = FuturesUnordered::<Attempt>::new();
+    attempts.push(Box::pin(Async::<StdTcpStream>::connect(first)));
+
+    while let Some(next_address) = addresses.next() {
+        let next_attempt = attempts.next();
+        let sleep = timer.sleep(happy_eyeballs_timeout.expect("checked above"));
+        match future::select(next_attempt, sleep).await {
+            Either::Left((Some(Ok(stream)), _)) => return Ok(stream),
+            Either::Left((Some(Err(error)), _)) => {
+                last_error = Some(error);
+                attempts.push(Box::pin(Async::<StdTcpStream>::connect(next_address)));
+            }
+            Either::Left((None, _)) => {
+                attempts.push(Box::pin(Async::<StdTcpStream>::connect(next_address)));
+            }
+            Either::Right(((), _)) => {
+                attempts.push(Box::pin(Async::<StdTcpStream>::connect(next_address)));
+            }
+        }
+    }
+
+    while let Some(result) = attempts.next().await {
+        match result {
             Ok(stream) => return Ok(stream),
             Err(error) => last_error = Some(error),
         }
     }
 
-    Err(last_error.unwrap_or_else(|| {
+    Err(no_connected_address(last_error))
+}
+
+fn no_connected_address(last_error: Option<io::Error>) -> io::Error {
+    last_error.unwrap_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            "could not connect to any of the addresses",
+            "could not connect to any of the resolved addresses",
         )
-    }))
+    })
+}
+
+fn interleave_address_families(addresses: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    let Some(first) = addresses.first() else {
+        return addresses;
+    };
+    let first_is_ipv6 = first.is_ipv6();
+    let mut first_family = VecDeque::new();
+    let mut second_family = VecDeque::new();
+    for address in addresses {
+        if address.is_ipv6() == first_is_ipv6 {
+            first_family.push_back(address);
+        } else {
+            second_family.push_back(address);
+        }
+    }
+
+    let mut interleaved = Vec::with_capacity(first_family.len() + second_family.len());
+    while let Some(address) = first_family.pop_front() {
+        interleaved.push(address);
+        if let Some(address) = second_family.pop_front() {
+            interleaved.push(address);
+        }
+    }
+    interleaved.extend(second_family);
+    interleaved
 }
 
 fn socket_addresses(stream: &Async<StdTcpStream>) -> (Option<SocketAddr>, Option<SocketAddr>) {
@@ -642,6 +789,33 @@ fn socket_addresses(stream: &Async<StdTcpStream>) -> (Option<SocketAddr>, Option
 }
 
 impl ConnectorBuilder {
+    /// Replaces the default host resolver while retaining h12tiny's TCP,
+    /// TLS, ALPN, protocol, and pooling policy.
+    ///
+    /// This setting is ignored by [`Self::dialer`] and [`Self::tcp_dialer`],
+    /// which own their own name-resolution policy.
+    pub fn resolver<R>(mut self, resolver: R) -> Self
+    where
+        R: Resolver,
+    {
+        self.connector.resolver = Arc::new(resolver);
+        self
+    }
+
+    /// Sets the delay before beginning the next resolved TCP candidate.
+    ///
+    /// The default is 250 ms. Passing `None` disables concurrent address
+    /// racing and attempts each resolved address serially. This setting
+    /// applies only to the default TCP path; custom dialers own address
+    /// selection themselves.
+    pub fn happy_eyeballs_timeout(
+        mut self,
+        timeout: impl Into<Option<Duration>>,
+    ) -> Self {
+        self.connector.happy_eyeballs_timeout = timeout.into();
+        self
+    }
+
     /// Replaces the default DNS/TCP/TLS establishment sequence.
     pub fn dialer<D>(mut self, dialer: D) -> Self
     where
@@ -664,7 +838,7 @@ impl ConnectorBuilder {
     /// Limits connection establishment after the default resolver yields,
     /// including TCP and TLS. The default resolver uses synchronous
     /// `ToSocketAddrs`, so this timer cannot preempt a DNS lookup that blocks
-    /// while its future is first polled. Use [`ConnectorBuilder::dialer`] for
+    /// while its future is first polled. Use [`ConnectorBuilder::resolver`] for
     /// asynchronous DNS that must be covered by cancellation and this timer.
     /// This does not limit a request, response headers, or a response body.
     pub fn connect_timeout(mut self, timeout: Duration) -> Self {
@@ -718,13 +892,17 @@ fn default_tls_config() -> rustls::ClientConfig {
 #[cfg(test)]
 mod tests {
     use std::net::TcpListener;
+    use std::net::SocketAddr;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     #[cfg(feature = "tls")]
     use super::ClientTlsConfigBuilder;
-    use super::{Connector, DialFuture, Dialer, Error, TcpConnected, TcpDialFuture, TcpDialer};
+    use super::{
+        Connector, DialFuture, Dialer, Error, ResolveFuture, Resolver, TcpConnected,
+        TcpDialFuture, TcpDialer,
+    };
     use http::Uri;
 
     #[derive(Clone, Default)]
@@ -753,6 +931,14 @@ mod tests {
         }
     }
 
+    struct PendingResolver;
+
+    impl Resolver for PendingResolver {
+        fn resolve(&self, _: String, _: u16) -> ResolveFuture {
+            Box::pin(std::future::pending())
+        }
+    }
+
     #[derive(Clone, Default)]
     struct RecordingTcpDialer(Arc<AtomicUsize>);
 
@@ -777,6 +963,29 @@ mod tests {
                     .map(TcpConnected::new)
                     .map_err(|error| Box::new(error) as _)
             })
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingResolver {
+        addresses: Vec<SocketAddr>,
+        requests: Arc<Mutex<Vec<(String, u16)>>>,
+    }
+
+    impl RecordingResolver {
+        fn new(addresses: impl Into<Vec<SocketAddr>>) -> Self {
+            Self {
+                addresses: addresses.into(),
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl Resolver for RecordingResolver {
+        fn resolve(&self, host: String, port: u16) -> ResolveFuture {
+            self.requests.lock().unwrap().push((host, port));
+            let addresses = self.addresses.clone();
+            Box::pin(async move { Ok(addresses) })
         }
     }
 
@@ -849,6 +1058,71 @@ mod tests {
         .unwrap();
 
         assert_eq!(connected.protocol, super::super::ConnectionProtocol::Http1);
+    }
+
+    #[test]
+    fn custom_resolver_receives_the_origin_host_and_effective_port() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let resolver = RecordingResolver::new([address]);
+        let connector = Connector::with_resolver(resolver.clone());
+        let connected = smol::block_on(
+            connector.connect("http://example.test/".parse().unwrap(), false),
+        )
+        .unwrap();
+
+        assert_eq!(connected.protocol, super::super::ConnectionProtocol::Http1);
+        assert_eq!(
+            *resolver.requests.lock().unwrap(),
+            vec![("example.test".to_owned(), 80)]
+        );
+    }
+
+    #[test]
+    fn connect_timeout_cancels_a_pending_resolver() {
+        let connector = Connector::builder()
+            .resolver(PendingResolver)
+            .connect_timeout(Duration::ZERO)
+            .build();
+        let result =
+            smol::block_on(connector.connect("http://example.test/".parse().unwrap(), false));
+
+        assert!(matches!(result, Err(Error::Timeout)));
+    }
+
+    #[test]
+    fn tcp_dialer_bypasses_a_custom_resolver() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let resolver = RecordingResolver::new(Vec::<SocketAddr>::new());
+        let connector = Connector::builder()
+            .resolver(resolver.clone())
+            .tcp_dialer(LocalTcpDialer)
+            .build();
+        let connected = smol::block_on(
+            connector.connect(format!("http://{address}/").parse().unwrap(), false),
+        )
+        .unwrap();
+
+        assert_eq!(connected.protocol, super::super::ConnectionProtocol::Http1);
+        assert!(resolver.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn resolved_address_order_alternates_address_families() {
+        let v4_one: SocketAddr = "127.0.0.1:80".parse().unwrap();
+        let v4_two: SocketAddr = "127.0.0.2:80".parse().unwrap();
+        let v6_one: SocketAddr = "[::1]:80".parse().unwrap();
+        let v6_two: SocketAddr = "[::2]:80".parse().unwrap();
+
+        assert_eq!(
+            super::interleave_address_families(vec![v6_one, v6_two, v4_one, v4_two]),
+            vec![v6_one, v4_one, v6_two, v4_two]
+        );
+        assert_eq!(
+            super::interleave_address_families(vec![v4_one, v4_two, v6_one, v6_two]),
+            vec![v4_one, v6_one, v4_two, v6_two]
+        );
     }
 
     #[cfg(feature = "tls")]
