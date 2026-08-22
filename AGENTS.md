@@ -209,7 +209,7 @@ copying.
 | `crates/h12tiny-client/src/normalize.rs` | substantially ported from `client/legacy/client.rs` | origin, Host, request-target, CONNECT normalization |
 | `crates/h12tiny-client/src/pool.rs` | substantially ported from `client/legacy/pool.rs` | H1/H2 reservations, waiters, expiry, idle capping |
 | `crates/h12tiny-client/src/lib.rs` | substantially ported from `client/legacy/client.rs` | dispatch, handshakes, pool lifecycle, retry boundaries |
-| `crates/h12tiny-client/src/connect.rs` | rewritten from the `client/legacy/connect` boundary | async-net DNS/TCP, Rustls/ALPN, dialer, establishment timeout |
+| `crates/h12tiny-client/src/connect.rs` | rewritten from the `client/legacy/connect` boundary | async-net DNS, async-io TCP, Rustls/ALPN, dialer, establishment timeout |
 | `crates/h12tiny-client-normalize/src/lib.rs` | extracted from local `h12tiny-client` normalization | shared direct-origin URI, Host, and request-target rules |
 | `crates/h12tiny-client-sync/src/lib.rs` | local extension | blocking HTTP/1.1 serialization, response framing, std/Rustls transport |
 | `crates/h12tiny-server/src/conn/auto.rs` | substantially ported from `server/conn/auto` and `common/rewind` | progressive H1/H2 selection and replay |

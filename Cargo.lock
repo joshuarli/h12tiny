@@ -441,6 +441,7 @@ name = "h12tiny-client"
 version = "0.1.0"
 dependencies = [
  "async-io",
+ "async-net",
  "futures-channel",
  "futures-io",
  "futures-lite",

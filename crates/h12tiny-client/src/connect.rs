@@ -2,22 +2,22 @@
 //!
 //! This is intentionally a small replacement for Hyper-util's Tokio
 //! `HttpConnector`: no proxy discovery, socket tuning, interface binding, or
-//! platform TLS. The default path resolves names with the standard library and
-//! connects sockets with `async-io`; Rustls authenticates HTTPS and selects the
+//! platform TLS. The default path resolves names with `async-net` and connects
+//! sockets with `async-io`; Rustls authenticates HTTPS and selects the
 //! application protocol with ALPN.
 //!
-//! The standard library resolver is synchronous, so name resolution can block
-//! the task that first polls a default connection. This is deliberate: the
-//! client does not create or depend on a process-global blocking worker pool.
-//! Applications that need asynchronous or otherwise specialized DNS can use
-//! [`Resolver`] while retaining h12tiny's TCP, TLS, ALPN, and pooling policy.
+//! System DNS itself is blocking, but [`SystemResolver`] delegates that work to
+//! `async-net`'s process-global `blocking` executor, keeping it out of the
+//! task polling a connection. Applications that need resolver-specific
+//! cancellation, caching, or lookup protocols can use [`Resolver`] while
+//! retaining h12tiny's TCP, TLS, ALPN, and pooling policy.
 
 use std::error::Error as StdError;
 use std::fmt;
 use std::future::Future;
 use std::io;
 use std::collections::VecDeque;
-use std::net::{SocketAddr, TcpStream as StdTcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream as StdTcpStream};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -174,19 +174,24 @@ pub trait Resolver: Send + Sync + 'static {
 
 /// The default system resolver used by [`Connector`].
 ///
-/// It delegates to [`ToSocketAddrs`], so its lookup is synchronous when first
-/// polled. Applications that need cancellation-aware DNS, an address cache,
-/// or a custom resolver should install [`Resolver`] through
-/// [`ConnectorBuilder::resolver`].
+/// It delegates to [`async_net::resolve`], which runs the platform resolver on
+/// `blocking`'s process-global executor. This keeps an in-flight system lookup
+/// from blocking the task polling a connection or delaying
+/// [`ConnectorBuilder::connect_timeout`]. Dropping the returned future stops
+/// waiting for the lookup, but cannot interrupt a platform lookup that has
+/// already started.
+///
+/// `SystemResolver` intentionally has no cache or resolver-specific timeout.
+/// Applications that need either, or a DNS protocol other than the platform
+/// resolver, should install [`Resolver`] through [`ConnectorBuilder::resolver`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemResolver;
 
 impl Resolver for SystemResolver {
     fn resolve(&self, host: String, port: u16) -> ResolveFuture {
         Box::pin(async move {
-            (host.as_str(), port)
-                .to_socket_addrs()
-                .map(Iterator::collect)
+            async_net::resolve((host, port))
+                .await
                 .map_err(|error| Box::new(error) as DialError)
         })
     }
@@ -845,11 +850,11 @@ impl ConnectorBuilder {
         self
     }
 
-    /// Limits connection establishment after the default resolver yields,
-    /// including TCP and TLS. The default resolver uses synchronous
-    /// `ToSocketAddrs`, so this timer cannot preempt a DNS lookup that blocks
-    /// while its future is first polled. Use [`ConnectorBuilder::resolver`] for
-    /// asynchronous DNS that must be covered by cancellation and this timer.
+    /// Limits default resolution, TCP, and TLS establishment. Cancelling the
+    /// default resolver wait stops waiting for `async-net`, but cannot
+    /// interrupt a platform lookup that has already begun on `blocking`'s
+    /// process-global executor. Use [`ConnectorBuilder::resolver`] when DNS itself
+    /// needs a protocol-specific deadline or cancellation policy.
     /// This does not limit a request, response headers, or a response body.
     pub fn connect_timeout(mut self, timeout: Duration) -> Self {
         self.connector.connect_timeout = Some(timeout);
@@ -1108,12 +1113,12 @@ mod tests {
     }
 
     #[test]
-    fn default_tcp_connector_resolves_and_connects_without_async_net() {
+    fn default_tcp_connector_resolves_and_connects() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let connector = Connector::new();
         let connected = smol::block_on(
-            connector.connect(format!("http://127.0.0.1:{port}/").parse().unwrap(), false),
+            connector.connect(format!("http://localhost:{port}/").parse().unwrap(), false),
         )
         .unwrap();
 
