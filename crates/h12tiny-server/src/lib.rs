@@ -19,7 +19,8 @@ pub mod lifecycle;
 ///
 /// Reexporting this boundary keeps applications on h12tiny's selected
 /// futures-rustls version instead of requiring a second direct dependency just
-/// to adapt an already-configured `rustls::ServerConfig`.
+/// to adapt an already-configured `rustls::ServerConfig`. Applications should
+/// build that config with `rustls_graviola::default_provider()`.
 #[cfg(feature = "tls")]
 pub use futures_rustls::TlsAcceptor;
 pub use lifecycle::{serve, ConnectionError, Listener};

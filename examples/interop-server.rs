@@ -29,7 +29,10 @@ fn tls_config() -> rustls::ServerConfig {
         CertificateDer::from(include_bytes!("../tests/fixtures/tls/cert.der").to_vec());
     let key = PrivateKeyDer::try_from(include_bytes!("../tests/fixtures/tls/key.der").to_vec())
         .expect("the committed TLS fixture key must be PKCS#8 DER");
-    let mut config = rustls::ServerConfig::builder()
+    let provider = Arc::new(rustls_graviola::default_provider());
+    let mut config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("Graviola supports Rustls' safe default protocol versions")
         .with_no_client_auth()
         .with_single_cert(vec![certificate], key)
         .expect("the committed TLS fixture certificate and key must match");

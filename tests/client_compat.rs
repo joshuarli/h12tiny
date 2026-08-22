@@ -399,7 +399,10 @@ fn custom_rustls_config_uses_client_certificate_and_custom_root() {
         client_roots
             .add(certificate.clone())
             .expect("fixture certificate is a valid client root");
-        let mut client_config = rustls::ClientConfig::builder()
+        let provider = Arc::new(rustls_graviola::default_provider());
+        let mut client_config = rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .expect("Graviola supports Rustls' safe default protocol versions")
             .with_root_certificates(client_roots)
             .with_client_auth_cert(vec![certificate.clone()], key.clone_key())
             .expect("fixture cert and key are a client identity");
@@ -409,12 +412,17 @@ fn custom_rustls_config_uses_client_certificate_and_custom_root() {
         server_roots
             .add(certificate.clone())
             .expect("fixture certificate is a valid server root");
-        let verifier = WebPkiClientVerifier::builder(Arc::new(server_roots))
-            .build()
-            .expect("fixture client root builds a verifier");
+        let verifier = WebPkiClientVerifier::builder_with_provider(
+            Arc::new(server_roots),
+            provider.clone(),
+        )
+        .build()
+        .expect("fixture client root builds a verifier");
         let server_key = PrivateKeyDer::try_from(include_bytes!("fixtures/tls/key.der").to_vec())
             .expect("fixture key is valid DER");
-        let mut server_config = rustls::ServerConfig::builder()
+        let mut server_config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("Graviola supports Rustls' safe default protocol versions")
             .with_client_cert_verifier(verifier)
             .with_single_cert(vec![certificate], server_key)
             .expect("fixture cert and key are a server identity");

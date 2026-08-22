@@ -396,14 +396,12 @@ impl ConnectorBuilder {
 fn default_tls_config() -> rustls::ClientConfig {
     let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     // h12tiny selects the provider it was compiled to use instead of relying on
-    // Rustls' process-global provider choice. Applications that also include a
-    // server stack may enable a different provider (for example aws-lc-rs);
-    // `ClientConfig::builder()` would then panic before the caller can even use
-    // a plaintext origin. The connector's TLS policy stays local and explicit.
-    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    // Rustls' process-global provider choice. The connector's TLS policy stays
+    // local and explicit, while Graviola supplies all cryptographic operations.
+    let provider = std::sync::Arc::new(rustls_graviola::default_provider());
     let mut config = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
-        .expect("ring supports Rustls' safe default protocol versions")
+        .expect("Graviola supports Rustls' safe default protocol versions")
         .with_root_certificates(roots)
         .with_no_client_auth();
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];

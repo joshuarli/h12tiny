@@ -10,7 +10,7 @@ license = "MIT OR Apache-2.0"
 default = []
 http1 = ["hyper/server", "hyper/http1"]
 http2 = ["hyper/server", "hyper/http2"]
-tls = ["dep:futures-rustls", "dep:rustls"]
+tls = ["dep:futures-rustls", "dep:rustls", "dep:rustls-graviola"]
 upgrade = ["http1"]
 
 [dependencies]
@@ -26,6 +26,7 @@ http-body = { workspace = true }
 hyper = { workspace = true }
 pin-project-lite = { workspace = true }
 rustls = { workspace = true, optional = true }
+rustls-graviola = { workspace = true, optional = true }
 
 [dev-dependencies]
 futures-lite = { workspace = true }

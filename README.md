@@ -78,6 +78,25 @@ validation, `101` response construction, and futures-lite server-role framing;
 message policy remains application-owned. Raw H1 upgrade remains available for
 other protocols, and HTTP/2 extended CONNECT is not implemented.
 
+TLS uses `rustls` with the pure-Rust Graviola provider from
+`rustls-graviola`. No `ring`, `aws-lc-rs`, OpenSSL, or
+native-tls backend is enabled. The built-in client selects Graviola explicitly.
+Applications that construct their own `rustls::ClientConfig` or
+`rustls::ServerConfig` should select the same provider explicitly (or install
+it once at startup):
+
+```rust,no_run
+let provider = std::sync::Arc::new(rustls_graviola::default_provider());
+let builder = rustls::ClientConfig::builder_with_provider(provider)
+    .with_safe_default_protocol_versions()
+    .expect("Graviola supports Rustls' safe default protocol versions");
+```
+
+`rustls-webpki` remains as Rustls' certificate-validation implementation; it
+is not a separate crypto backend. The selected Graviola release currently
+supports `x86_64` and `aarch64`; TLS builds for other architectures remain an
+upstream limitation rather than falling back to another crypto backend.
+
 Run the enforced feature/dependency matrix with:
 
 ```sh

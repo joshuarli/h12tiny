@@ -1,13 +1,11 @@
 [package]
 name = "h12tiny"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.85"
+edition = "2024"
+rust-version = "1.89"
 description = "A small futures-lite HTTP/1.1 and HTTP/2 endpoint layer"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/hyperium/h12tiny"
-keywords = ["http", "async", "futures", "http2"]
-categories = ["asynchronous", "network-programming", "web-programming::http-client", "web-programming::http-server"]
+license = "MIT"
+repository = "https://github.com/laputa-systems/h12tiny"
 
 [workspace]
 members = [
@@ -26,13 +24,14 @@ bytes = "1"
 futures-channel = "0.3"
 futures-io = "0.3"
 futures-lite = { version = "2", default-features = false, features = ["std"] }
-futures-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+futures-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 futures-util = { version = "0.3", default-features = false, features = ["async-await", "std"] }
 http = "1"
 http-body = "1"
 hyper = { package = "laputa-hyper-futures-lite", version = "1.11", default-features = false }
 pin-project-lite = "0.2"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["custom-provider", "std", "tls12"] }
+rustls-graviola = { version = "0.4", default-features = false }
 webpki-roots = "1"
 
 [features]
@@ -93,6 +92,7 @@ http = { workspace = true }
 http-body = { workspace = true }
 hyper = { workspace = true, features = ["client", "server", "http1", "http2"] }
 rustls = { workspace = true }
+rustls-graviola = { workspace = true }
 smol = "2"
 
 [lints.rust]

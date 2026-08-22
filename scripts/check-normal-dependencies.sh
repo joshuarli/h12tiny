@@ -25,6 +25,14 @@ forbidden='\
 tokio
 tokio-util
 native-tls
+ring
+aws-lc-rs
+aws-lc-sys
+openssl
+openssl-sys
+cc
+cmake
+bindgen
 hyper-util
 reqwest
 tower

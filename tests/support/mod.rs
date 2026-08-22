@@ -175,7 +175,10 @@ pub fn fixture_server_config() -> rustls::ServerConfig {
     let certificate = CertificateDer::from(include_bytes!("../fixtures/tls/cert.der").to_vec());
     let key = PrivateKeyDer::try_from(include_bytes!("../fixtures/tls/key.der").to_vec())
         .expect("fixture key is valid PKCS#8 DER");
-    let mut config = rustls::ServerConfig::builder()
+    let provider = Arc::new(rustls_graviola::default_provider());
+    let mut config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("Graviola supports Rustls' safe default protocol versions")
         .with_no_client_auth()
         .with_single_cert(vec![certificate], key)
         .expect("fixture certificate and key match");
@@ -192,7 +195,10 @@ pub fn fixture_client_config() -> rustls::ClientConfig {
     roots
         .add(certificate)
         .expect("fixture certificate is a valid root");
-    let mut config = rustls::ClientConfig::builder()
+    let provider = Arc::new(rustls_graviola::default_provider());
+    let mut config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("Graviola supports Rustls' safe default protocol versions")
         .with_root_certificates(roots)
         .with_no_client_auth();
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];

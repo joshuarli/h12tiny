@@ -39,7 +39,7 @@ require_present() {
 check_forbidden() {
     graph=$1
     label=$2
-    for package in tokio tokio-util native-tls reqwest axum hyper-util tower tower-layer; do
+    for package in tokio tokio-util native-tls ring aws-lc-rs aws-lc-sys openssl openssl-sys cc cmake bindgen reqwest axum hyper-util tower tower-layer; do
         require_absent "$package" "$graph" "$label"
     done
 }
@@ -47,6 +47,7 @@ check_forbidden() {
 client_h1=$(tree -p h12tiny-client --no-default-features --features http1)
 client_h2=$(tree -p h12tiny-client --no-default-features --features http2)
 client_h1_tls=$(tree -p h12tiny-client --no-default-features --features http1,tls)
+server_h1_tls=$(tree -p h12tiny-server --no-default-features --features http1,tls)
 server_h1=$(tree -p h12tiny-server --no-default-features --features http1)
 server_h2=$(tree -p h12tiny-server --no-default-features --features http2)
 util_plain=$(tree -p h12tiny-util --no-default-features)
@@ -63,6 +64,11 @@ for package in h12tiny-server h12tiny-web serde serde_json tokio; do
     require_absent "$package" "$client_h2" "H2-only client"
 done
 require_present rustls "$client_h1_tls" "TLS H1 client"
+require_present rustls-graviola "$client_h1_tls" "TLS H1 client"
+require_present graviola "$client_h1_tls" "TLS H1 client"
+require_present rustls "$server_h1_tls" "TLS H1 server"
+require_present rustls-graviola "$server_h1_tls" "TLS H1 server"
+require_present graviola "$server_h1_tls" "TLS H1 server"
 
 for package in laputa-h2-futures h12tiny-client h12tiny-web serde serde_json tokio; do
     require_absent "$package" "$server_h1" "H1-only server"
@@ -92,6 +98,7 @@ for label_and_graph in \
     "H1-only client:$client_h1" \
     "H2-only client:$client_h2" \
     "TLS H1 client:$client_h1_tls" \
+    "TLS H1 server:$server_h1_tls" \
     "H1-only server:$server_h1" \
     "H2-only server:$server_h2" \
     "util without json:$util_plain" \
