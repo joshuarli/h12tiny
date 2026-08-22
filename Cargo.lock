@@ -276,17 +276,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
-name = "fastwebsockets"
-version = "0.10.0"
-dependencies = [
- "bytes",
- "fastrand",
- "futures-lite",
- "simdutf8",
- "thiserror",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -418,7 +407,7 @@ dependencies = [
  "h12tiny-web",
  "http",
  "http-body",
- "hyper",
+ "laputa-hyper-futures-lite",
  "rustls",
  "smol",
 ]
@@ -435,7 +424,7 @@ dependencies = [
  "h12tiny-core",
  "http",
  "http-body",
- "hyper",
+ "laputa-hyper-futures-lite",
  "rustls",
  "smol",
  "webpki-roots",
@@ -447,7 +436,7 @@ version = "0.1.0"
 dependencies = [
  "async-io",
  "futures-io",
- "hyper",
+ "laputa-hyper-futures-lite",
 ]
 
 [[package]]
@@ -464,7 +453,7 @@ dependencies = [
  "h12tiny-core",
  "http",
  "http-body",
- "hyper",
+ "laputa-hyper-futures-lite",
  "pin-project-lite",
  "rustls",
 ]
@@ -493,7 +482,6 @@ dependencies = [
  "async-io",
  "base64",
  "bytes",
- "fastwebsockets",
  "futures-lite",
  "futures-util",
  "h12tiny-core",
@@ -502,31 +490,13 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
- "hyper",
+ "laputa-fastwebsockets-futures-lite",
+ "laputa-hyper-futures-lite",
  "matchit",
  "serde",
  "serde_json",
  "serde_urlencoded",
  "sha1",
-]
-
-[[package]]
-name = "h2-futures"
-version = "0.4.16"
-dependencies = [
- "atomic-waker",
- "bytes",
- "fnv",
- "futures-core",
- "futures-io",
- "futures-lite",
- "futures-sink",
- "http",
- "indexmap",
- "log",
- "pin-project-lite",
- "slab",
- "tracing",
 ]
 
 [[package]]
@@ -587,27 +557,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
-name = "hyper"
-version = "1.11.0"
-dependencies = [
- "atomic-waker",
- "bytes",
- "futures-channel",
- "futures-core",
- "futures-io",
- "futures-lite",
- "h2-futures",
- "http",
- "http-body",
- "httparse",
- "httpdate",
- "itoa",
- "pin-project-lite",
- "smallvec",
- "want",
-]
-
-[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -622,6 +571,57 @@ name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
+name = "laputa-fastwebsockets-futures-lite"
+version = "0.10.0"
+dependencies = [
+ "bytes",
+ "fastrand",
+ "futures-lite",
+ "simdutf8",
+ "thiserror",
+]
+
+[[package]]
+name = "laputa-h2-futures"
+version = "0.4.16"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "fnv",
+ "futures-core",
+ "futures-io",
+ "futures-lite",
+ "futures-sink",
+ "http",
+ "indexmap",
+ "log",
+ "pin-project-lite",
+ "slab",
+ "tracing",
+]
+
+[[package]]
+name = "laputa-hyper-futures-lite"
+version = "1.11.0"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "futures-channel",
+ "futures-core",
+ "futures-io",
+ "futures-lite",
+ "http",
+ "http-body",
+ "httparse",
+ "httpdate",
+ "itoa",
+ "laputa-h2-futures",
+ "pin-project-lite",
+ "smallvec",
+ "want",
+]
 
 [[package]]
 name = "libc"

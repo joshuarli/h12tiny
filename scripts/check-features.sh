@@ -55,19 +55,19 @@ web_websocket=$(tree -p h12tiny-web --no-default-features --features websocket)
 facade_h1=$(tree -p h12tiny --no-default-features --features client,http1)
 facade_websocket=$(tree -p h12tiny --no-default-features --features websocket)
 
-for package in h2-futures h12tiny-server h12tiny-web rustls serde serde_json tokio; do
+for package in laputa-h2-futures h12tiny-server h12tiny-web rustls serde serde_json tokio; do
     require_absent "$package" "$client_h1" "H1-only client"
 done
-require_present h2-futures "$client_h2" "H2-only client"
+require_present laputa-h2-futures "$client_h2" "H2-only client"
 for package in h12tiny-server h12tiny-web serde serde_json tokio; do
     require_absent "$package" "$client_h2" "H2-only client"
 done
 require_present rustls "$client_h1_tls" "TLS H1 client"
 
-for package in h2-futures h12tiny-client h12tiny-web serde serde_json tokio; do
+for package in laputa-h2-futures h12tiny-client h12tiny-web serde serde_json tokio; do
     require_absent "$package" "$server_h1" "H1-only server"
 done
-require_present h2-futures "$server_h2" "H2-only server"
+require_present laputa-h2-futures "$server_h2" "H2-only server"
 for package in h12tiny-client h12tiny-web serde serde_json tokio; do
     require_absent "$package" "$server_h2" "H2-only server"
 done
@@ -75,16 +75,16 @@ done
 for package in serde serde_json tokio h12tiny-client h12tiny-server h12tiny-web; do
     require_absent "$package" "$util_plain" "util without json"
 done
-for package in base64 fastwebsockets h12tiny-core serde_json serde_urlencoded sha1 tokio tower axum; do
+for package in base64 laputa-fastwebsockets-futures-lite h12tiny-core serde_json serde_urlencoded sha1 tokio tower axum; do
     require_absent "$package" "$web_plain" "web without json/query"
 done
-for package in base64 fastwebsockets h12tiny-core h12tiny-server sha1; do
+for package in base64 laputa-fastwebsockets-futures-lite h12tiny-core h12tiny-server sha1; do
     require_present "$package" "$web_websocket" "web WebSocket feature"
 done
-for package in base64 fastwebsockets sha1; do
+for package in base64 laputa-fastwebsockets-futures-lite sha1; do
     require_present "$package" "$facade_websocket" "facade WebSocket feature"
 done
-for package in h2-futures h12tiny-server h12tiny-web rustls serde serde_json tokio; do
+for package in laputa-h2-futures h12tiny-server h12tiny-web rustls serde serde_json tokio; do
     require_absent "$package" "$facade_h1" "facade H1-only client"
 done
 
