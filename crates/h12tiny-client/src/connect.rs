@@ -526,6 +526,9 @@ impl Connector {
         let scheme = uri
             .scheme_str()
             .ok_or_else(|| Error::UnsupportedScheme("".to_owned()))?;
+        if !matches!(scheme, "http" | "https") {
+            return Err(Error::UnsupportedScheme(scheme.to_owned()));
+        }
         let tcp = match &self.kind {
             ConnectorKind::Tcp(dialer) => {
                 Some(dialer.connect(uri.clone()).await.map_err(Error::Custom)?)
@@ -727,6 +730,7 @@ fn default_tls_config() -> rustls::ClientConfig {
 #[cfg(test)]
 mod tests {
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -760,6 +764,16 @@ mod tests {
     impl TcpDialer for PendingTcpDialer {
         fn connect(&self, _: Uri) -> TcpDialFuture {
             Box::pin(std::future::pending())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingTcpDialer(Arc<AtomicUsize>);
+
+    impl TcpDialer for RecordingTcpDialer {
+        fn connect(&self, _: Uri) -> TcpDialFuture {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(Box::new(std::io::Error::other("unexpected dial")) as _) })
         }
     }
 
@@ -814,6 +828,18 @@ mod tests {
             connector.connect("http://example.test/".parse().unwrap(), false),
         );
         assert!(matches!(result, Err(Error::Timeout)));
+    }
+
+    #[test]
+    fn tcp_dialer_is_not_called_for_an_unsupported_scheme() {
+        let dialer = RecordingTcpDialer::default();
+        let connector = Connector::with_tcp_dialer(dialer.clone());
+        let result = smol::block_on(
+            connector.connect("ftp://example.test/".parse().unwrap(), false),
+        );
+
+        assert!(matches!(result, Err(Error::UnsupportedScheme(scheme)) if scheme == "ftp"));
+        assert_eq!(dialer.0.load(Ordering::SeqCst), 0);
     }
 
     #[test]
