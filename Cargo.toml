@@ -11,6 +11,8 @@ repository = "https://github.com/laputa-systems/h12tiny"
 members = [
     "crates/h12tiny-core",
     "crates/h12tiny-client",
+    "crates/h12tiny-client-normalize",
+    "crates/h12tiny-client-sync",
     "crates/h12tiny-server",
     "crates/h12tiny-util",
     "crates/h12tiny-web",
@@ -44,12 +46,13 @@ webpki-roots = "1"
 default = []
 core = ["dep:h12tiny-core"]
 client = ["core", "dep:h12tiny-client"]
+client-sync = ["dep:h12tiny-client-sync"]
 server = ["core", "dep:h12tiny-server"]
 util = ["dep:h12tiny-util"]
 web = ["dep:h12tiny-web", "server", "util"]
 http1 = ["h12tiny-client?/http1", "h12tiny-server?/http1"]
 http2 = ["h12tiny-client?/http2", "h12tiny-server?/http2"]
-tls = ["h12tiny-client?/tls", "h12tiny-server?/tls"]
+tls = ["h12tiny-client?/tls", "h12tiny-client-sync?/tls", "h12tiny-server?/tls"]
 upgrade = ["server", "http1", "h12tiny-server/upgrade", "h12tiny-web?/upgrade"]
 json = ["util", "h12tiny-util/json", "h12tiny-web?/json"]
 query = ["web", "h12tiny-web/query"]
@@ -59,7 +62,7 @@ cors = ["web", "h12tiny-web/cors"]
 # futures-lite framed upgraded connection. Raw `HttpUpgrade` remains available
 # through `upgrade` for applications that own another upgrade protocol.
 websocket = ["web", "upgrade", "h12tiny-web/websocket"]
-full = ["client", "server", "util", "web", "http1", "http2", "tls", "upgrade", "json", "query", "sse", "cors", "websocket"]
+full = ["client", "client-sync", "server", "util", "web", "http1", "http2", "tls", "upgrade", "json", "query", "sse", "cors", "websocket"]
 
 # These are runnable integration tools rather than protocol-only examples.
 # Keep feature-minimal library builds useful without trying to compile their
@@ -79,6 +82,7 @@ required-features = ["server", "http2"]
 [dependencies]
 h12tiny-core = { path = "crates/h12tiny-core", optional = true, default-features = false }
 h12tiny-client = { path = "crates/h12tiny-client", optional = true, default-features = false }
+h12tiny-client-sync = { path = "crates/h12tiny-client-sync", optional = true, default-features = false }
 h12tiny-server = { path = "crates/h12tiny-server", optional = true, default-features = false }
 h12tiny-util = { path = "crates/h12tiny-util", optional = true, default-features = false }
 h12tiny-web = { path = "crates/h12tiny-web", optional = true, default-features = false }

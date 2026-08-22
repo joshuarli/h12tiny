@@ -47,6 +47,8 @@ check_forbidden() {
 client_h1=$(tree -p h12tiny-client --no-default-features --features http1)
 client_h2=$(tree -p h12tiny-client --no-default-features --features http2)
 client_h1_tls=$(tree -p h12tiny-client --no-default-features --features http1,tls)
+sync_client_plain=$(tree -p h12tiny-client-sync --no-default-features)
+sync_client_tls=$(tree -p h12tiny-client-sync --no-default-features --features tls)
 server_h1_tls=$(tree -p h12tiny-server --no-default-features --features http1,tls)
 server_h1=$(tree -p h12tiny-server --no-default-features --features http1)
 server_h2=$(tree -p h12tiny-server --no-default-features --features http2)
@@ -54,6 +56,7 @@ util_plain=$(tree -p h12tiny-util --no-default-features)
 web_plain=$(tree -p h12tiny-web --no-default-features)
 web_websocket=$(tree -p h12tiny-web --no-default-features --features websocket)
 facade_h1=$(tree -p h12tiny --no-default-features --features client,http1)
+facade_sync_tls=$(tree -p h12tiny --no-default-features --features client-sync,tls)
 facade_websocket=$(tree -p h12tiny --no-default-features --features websocket)
 
 for package in laputa-h2-futures h12tiny-server h12tiny-web rustls serde serde_json tokio; do
@@ -66,6 +69,15 @@ done
 require_present rustls "$client_h1_tls" "TLS H1 client"
 require_present rustls-graviola "$client_h1_tls" "TLS H1 client"
 require_present graviola "$client_h1_tls" "TLS H1 client"
+for package in async-io async-net futures-channel futures-core futures-io futures-lite futures-rustls futures-util laputa-hyper-futures-lite laputa-h2-futures h12tiny-core rustls serde serde_json tokio; do
+    require_absent "$package" "$sync_client_plain" "plain sync client"
+done
+require_present rustls "$sync_client_tls" "TLS sync client"
+require_present rustls-graviola "$sync_client_tls" "TLS sync client"
+require_present graviola "$sync_client_tls" "TLS sync client"
+for package in async-io async-net futures-channel futures-core futures-io futures-lite futures-rustls futures-util laputa-hyper-futures-lite laputa-h2-futures h12tiny-core serde serde_json tokio; do
+    require_absent "$package" "$sync_client_tls" "TLS sync client"
+done
 require_present rustls "$server_h1_tls" "TLS H1 server"
 require_present rustls-graviola "$server_h1_tls" "TLS H1 server"
 require_present graviola "$server_h1_tls" "TLS H1 server"
@@ -93,11 +105,18 @@ done
 for package in laputa-h2-futures h12tiny-server h12tiny-web rustls serde serde_json tokio; do
     require_absent "$package" "$facade_h1" "facade H1-only client"
 done
+require_present h12tiny-client-sync "$facade_sync_tls" "facade TLS sync client"
+require_present rustls "$facade_sync_tls" "facade TLS sync client"
+for package in async-io async-net futures-channel futures-core futures-io futures-lite futures-rustls futures-util laputa-hyper-futures-lite laputa-h2-futures h12tiny-client h12tiny-core h12tiny-server h12tiny-web serde serde_json tokio; do
+    require_absent "$package" "$facade_sync_tls" "facade TLS sync client"
+done
 
 for label_and_graph in \
     "H1-only client:$client_h1" \
     "H2-only client:$client_h2" \
     "TLS H1 client:$client_h1_tls" \
+    "plain sync client:$sync_client_plain" \
+    "TLS sync client:$sync_client_tls" \
     "TLS H1 server:$server_h1_tls" \
     "H1-only server:$server_h1" \
     "H2-only server:$server_h2" \
@@ -105,6 +124,7 @@ for label_and_graph in \
     "web without json/query:$web_plain" \
     "web WebSocket feature:$web_websocket" \
     "facade H1-only client:$facade_h1" \
+    "facade TLS sync client:$facade_sync_tls" \
     "facade WebSocket feature:$facade_websocket"; do
     label=${label_and_graph%%:*}
     graph=${label_and_graph#*:}
@@ -116,6 +136,8 @@ cargo check -p h12tiny-client --no-default-features --features http2
 cargo check -p h12tiny-client --no-default-features --features http1,http2
 cargo check -p h12tiny-client --no-default-features --features http1,tls
 cargo check -p h12tiny-client --no-default-features --features http2,tls
+cargo check -p h12tiny-client-sync --no-default-features
+cargo check -p h12tiny-client-sync --no-default-features --features tls
 cargo check -p h12tiny-server --no-default-features --features http1
 cargo check -p h12tiny-server --no-default-features --features http2
 cargo check -p h12tiny-server --no-default-features --features http1,http2
@@ -123,6 +145,7 @@ cargo check -p h12tiny-server --no-default-features --features http1,tls
 cargo check -p h12tiny-server --no-default-features --features http2,tls
 cargo check -p h12tiny --no-default-features --features client,http1
 cargo check -p h12tiny --no-default-features --features client,http2
+cargo check -p h12tiny --no-default-features --features client-sync,tls
 cargo check -p h12tiny --no-default-features --features server,http1
 cargo check -p h12tiny --no-default-features --features server,http2
 cargo check -p h12tiny --no-default-features --features websocket

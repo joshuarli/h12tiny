@@ -24,6 +24,13 @@ pub mod client {
     pub use h12tiny_client::*;
 }
 
+#[cfg(feature = "client-sync")]
+/// Blocking direct-origin HTTP/1.1 client reexported from
+/// [`h12tiny_client_sync`].
+pub mod client_sync {
+    pub use h12tiny_client_sync::*;
+}
+
 #[cfg(feature = "server")]
 /// Server connection and lifecycle primitives reexported from
 /// [`h12tiny_server`].

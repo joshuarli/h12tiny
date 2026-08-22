@@ -1,10 +1,11 @@
 # h12tiny
 
-`h12tiny` is a Tokio-free, futures-I/O-native HTTP stack with deliberately
-separate protocol, transport, body, and application layers. Hyper and the
-sibling `h2-futures-lite` own HTTP framing and state machines; h12tiny owns
-direct-origin transport policy, pooling, runtime adaptation, and the optional
-small application vocabulary.
+`h12tiny` is a Tokio-free HTTP stack with deliberately separate protocol,
+transport, body, and application layers. The futures-I/O client is built on
+Hyper and the sibling `h2-futures-lite`; the blocking client is a deliberately
+small direct-origin HTTP/1.1 codec. h12tiny owns direct-origin transport
+policy, pooling where applicable, runtime adaptation, and the optional small
+application vocabulary.
 
 The facade has no default features. Select only the roles and protocols an
 application needs, or depend on a component crate directly for the most
@@ -15,6 +16,7 @@ precise normal dependency graph.
 ```text
 h12tiny-core    futures-I/O bridge and runtime-neutral executor/timer
 h12tiny-client  direct client, normalization, pool, dialer, TLS/ALPN
+h12tiny-client-sync blocking direct HTTP/1.1 client, std I/O, optional Rustls
 h12tiny-server  H1/H2 serving, ALPN, raw H1 upgrade, listener lifecycle
 h12tiny-util    bodies, bounded collection, streams, idle timeout, JSON
 h12tiny-web     optional router, extractors, response conversion, SSE
@@ -39,6 +41,12 @@ HTTP/2 TLS client:
 h12tiny = { version = "0.1", default-features = false, features = ["client", "http2", "tls"] }
 ```
 
+Blocking HTTPS/HTTP/1.1 client:
+
+```toml
+h12tiny = { version = "0.1", default-features = false, features = ["client-sync", "tls"] }
+```
+
 HTTP/1 + HTTP/2 TLS server:
 
 ```toml
@@ -55,7 +63,8 @@ h12tiny = { version = "0.1", default-features = false, features = [
 
 The facade forwards features only to already-selected component crates. For
 example, `http1` does not instantiate a client or server on its own, and
-enabling `web` does not enable H1, H2, or TLS.
+enabling `web` does not enable H1, H2, or TLS. `client-sync` is intrinsically
+HTTP/1.1-only; it does not participate in `http1` or `http2` forwarding.
 
 ## Direct component dependencies
 
@@ -63,11 +72,15 @@ Use component crates when their ownership boundary is the application boundary:
 
 ```toml
 h12tiny-client = { version = "0.1", default-features = false, features = ["http1"] }
+h12tiny-client-sync = { version = "0.1", default-features = false, features = ["tls"] }
 h12tiny-util = { version = "0.1" }
 ```
 
 `h12tiny-util/json`, `h12tiny-web/json`, and `h12tiny-web/query` are optional;
 an H1-only client does not acquire JSON, routing, server, TLS, or H2 code.
+`h12tiny-client-sync` does not acquire Hyper, futures, an async runtime, or
+HTTP/2. Its response body implements `std::io::Read` and owns one connection;
+there is no pool, proxy policy, redirect policy, or upgrade support.
 
 ## Intentional scope
 
@@ -81,7 +94,8 @@ other protocols, and HTTP/2 extended CONNECT is not implemented.
 TLS uses `rustls` with the pure-Rust Graviola provider from
 `rustls-graviola`. No `ring`, `aws-lc-rs`, OpenSSL, or
 native-tls backend is enabled. The built-in client selects Graviola explicitly.
-`h12tiny_client::ClientTlsConfigBuilder` exposes those same defaults for
+`h12tiny_client::ClientTlsConfigBuilder` and
+`h12tiny_client_sync::ClientTlsConfigBuilder` expose those same defaults for
 custom root stores, mutual TLS, and ALPN, without installing or consulting a
 process-global Rustls provider or disabling an embedding application's default
 provider. Applications that construct their own

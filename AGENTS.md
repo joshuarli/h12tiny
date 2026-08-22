@@ -2,9 +2,10 @@
 
 ## Purpose and boundaries
 
-`h12tiny` is a Tokio-free, futures-I/O-native HTTP/1.1 and HTTP/2 endpoint
-layer. It deliberately separates HTTP protocol machinery from endpoint policy
-and optional application conveniences:
+`h12tiny` is a Tokio-free HTTP endpoint layer. Its futures-I/O client serves
+HTTP/1.1 and HTTP/2; its separately scoped blocking client serves direct-origin
+HTTP/1.1 only. It deliberately separates protocol machinery from endpoint
+policy and optional application conveniences:
 
 ```text
 application
@@ -16,13 +17,20 @@ client policy                         server policy
         └──────────── h12tiny-core ────────────┘
                        └── hyper-futures-lite
                              └── h2-futures-lite
+
+blocking client policy
+  └── h12tiny-client-sync
+        └── h12tiny-client-normalize
 ```
 
-Hyper and `h2-futures-lite` own HTTP framing, parsers, HTTP/2 state, HPACK,
-flow control, streams, GOAWAY, SETTINGS, and request/response protocol
-machinery. h12tiny owns direct-origin connection policy: DNS/TCP, Rustls/ALPN,
-per-origin pooling, request normalization, runtime adaptation, lifecycle, and
-server H1/H2 selection. Do not move protocol machinery upward into h12tiny.
+Hyper and `h2-futures-lite` own the futures-I/O client's HTTP framing, parsers,
+HTTP/2 state, HPACK, flow control, streams, GOAWAY, SETTINGS, and
+request/response protocol machinery. `h12tiny-client-sync` is the explicit
+exception: it owns only blocking HTTP/1.1 request serialization and bounded
+response framing over `std::net`/Rustls, and must not grow H2, upgrades, or
+general protocol machinery. h12tiny owns direct-origin connection policy:
+DNS/TCP, Rustls/ALPN, per-origin pooling where applicable, request
+normalization, runtime adaptation, lifecycle, and server H1/H2 selection.
 
 The root `h12tiny` package is a conditional facade only. It has no default
 features. Depend on a component crate when that is the real ownership boundary;
@@ -34,23 +42,29 @@ use the facade only for a convenient, explicitly selected combination.
 | --- | --- | --- |
 | `h12tiny-core` | `FuturesIo`/`HyperIo` bridges, runtime-neutral executor and timer adapters | pooling, connector policy, accept loops, TLS policy, JSON, routing, SSE |
 | `h12tiny-client` | direct connector/dialer, DNS/TCP, Rustls/ALPN, normalization, H1/H2 handshakes, pool, safe retry/lifecycle | server code, routing, serde/matchit conveniences |
+| `h12tiny-client-normalize` | transport-neutral direct-origin URI, Host, and HTTP/1 target normalization shared by client transports | DNS, TCP, TLS, pooling, HTTP framing, public request-builder policy |
+| `h12tiny-client-sync` | blocking direct-origin HTTP/1.1 request/response boundary, std TCP/Rustls, connection-owned `Read` body | futures, executors, H2, pooling, upgrades, proxy/redirect/cookie policy |
 | `h12tiny-server` | H1/H2 serving, progressive cleartext selection, TLS ALPN dispatch, raw H1 upgrades, TCP/TLS/Unix lifecycle | client pool/connector, router, serde/matchit |
 | `h12tiny-util` | bodies and streams, bounded collection, idle-body timeout, optional JSON, Bearer header, replay factories | DNS, TCP, TLS, accept loops, routing |
 | `h12tiny-web` | small router, extractors, response conversion, per-route limits/deadlines, optional JSON/query/SSE/CORS/upgrade/WebSocket boundary | protocol implementation, pooling, TLS, a middleware/DI framework, OpenAPI, application session policy |
 | `h12tiny` | feature-gated reexports | endpoint implementation |
 
-Dependency direction is a product contract: client and server use core; util is
-transport-free; web uses util and reaches server only through the optional
-upgrade surface. Client never depends on server or web. Preserve this direction
-when adding code or dependencies.
+Dependency direction is a product contract: the futures client and server use
+core; both client transports use the normalization component; the blocking
+client does not use core; util is transport-free; web uses util and reaches
+server only through the optional upgrade surface. Neither client depends on
+server or web. Preserve this direction when adding code or dependencies.
 
 ## Feature topology
 
 - `h12tiny-client` and `h12tiny-server` default to no protocol. Their `http1`,
   `http2`, and `tls` features are independent.
-- At the facade, `client`, `server`, `util`, and `web` select component crates;
-  `http1`, `http2`, and `tls` forward only to roles already selected. A protocol
-  flag must never instantiate a role by itself.
+- `h12tiny-client-sync` is intrinsically HTTP/1.1 and defaults to no TLS; its
+  `tls` feature adds only synchronous Rustls. It must never acquire Hyper,
+  futures, an async runtime, or H2.
+- At the facade, `client`, `client-sync`, `server`, `util`, and `web` select
+  component crates; `http1`, `http2`, and `tls` forward only to roles already
+  selected. A protocol flag must never instantiate a role by itself.
 - `json` is optional in util/web; `query`, `sse`, and `cors` are web-only.
   Serde-bearing conveniences must end at those layers.
 - `upgrade` provides raw HTTP/1 upgrade plumbing. It is the general escape
@@ -89,12 +103,17 @@ JSON/query/WebSocket dependencies. Do not make a convenience feature contagious.
 - The `Dialer` boundary owns transport selection. Do not bake proxy or
   URI-to-Unix-socket policy into the client. Rustls configuration belongs at the
   connector boundary; one client owns one TLS policy.
+- `h12tiny-client-sync` opens one HTTP/1.1 connection per request. Its returned
+  `ResponseBody` owns that connection and implements `std::io::Read`; dropping
+  it closes the transport. It sends `Connection: close`, has no pool, and
+  rejects protocol upgrades. Its `request_with_timeout` bounds request write
+  and response headers; `ResponseBody::set_read_timeout` bounds body reads.
 
 ### Runtime, timeouts, and cancellation
 
-- Production code is runtime-neutral. Use Hyper's executor boundary and the
-  core timer adapter; `smol` is test-only. Do not add Tokio time or a runtime
-  dependency.
+- Futures-I/O production code is runtime-neutral. Use Hyper's executor boundary
+  and the core timer adapter; `smol` is test-only. The blocking client uses no
+  runtime. Do not add Tokio time or a runtime dependency.
 - Keep timeout scopes distinct: pool idle eviction, connection establishment,
   application handler deadline, and body idle timeout have different contracts.
   Do not introduce an ambiguous whole-request timeout that breaks streaming.
@@ -141,8 +160,10 @@ use that policy.
 Do not turn these concepts into Axum compatibility, Tower layering, handler
 reflection, proc-macro APIs, or dependency injection. Familiar names are
 acceptable because they describe HTTP concepts, not because h12tiny clones a
-framework. Likewise, keep client APIs based on `http::Request`/`Response` and
-`http_body::Body`, not a Reqwest-like request-builder universe.
+framework. Likewise, keep futures client APIs based on `http::Request`/
+`Response` and `http_body::Body`, and keep blocking client APIs based on
+`http::Request`/`Response<ResponseBody>` plus `std::io::Read`, not a
+Reqwest-like request-builder universe.
 
 The sibling `../smolvm` is a compatibility and integration target, never an
 h12tiny dependency. Its OCI policy, redirects, URL/realm validation, token
@@ -189,6 +210,8 @@ copying.
 | `crates/h12tiny-client/src/pool.rs` | substantially ported from `client/legacy/pool.rs` | H1/H2 reservations, waiters, expiry, idle capping |
 | `crates/h12tiny-client/src/lib.rs` | substantially ported from `client/legacy/client.rs` | dispatch, handshakes, pool lifecycle, retry boundaries |
 | `crates/h12tiny-client/src/connect.rs` | rewritten from the `client/legacy/connect` boundary | async-net DNS/TCP, Rustls/ALPN, dialer, establishment timeout |
+| `crates/h12tiny-client-normalize/src/lib.rs` | extracted from local `h12tiny-client` normalization | shared direct-origin URI, Host, and request-target rules |
+| `crates/h12tiny-client-sync/src/lib.rs` | local extension | blocking HTTP/1.1 serialization, response framing, std/Rustls transport |
 | `crates/h12tiny-server/src/conn/auto.rs` | substantially ported from `server/conn/auto` and `common/rewind` | progressive H1/H2 selection and replay |
 | `crates/h12tiny-core/src/io.rs` | rewritten from `rt/io` | futures-I/O/Hyper I/O bridges and raw-upgrade adaptation |
 | `crates/h12tiny-core/src/runtime.rs` | rewritten from `common/{exec,timer}` | runtime-neutral executor and timer |

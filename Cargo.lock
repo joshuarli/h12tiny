@@ -423,6 +423,7 @@ dependencies = [
  "futures-rustls",
  "futures-util",
  "h12tiny-client",
+ "h12tiny-client-sync",
  "h12tiny-core",
  "h12tiny-server",
  "h12tiny-util",
@@ -444,6 +445,7 @@ dependencies = [
  "futures-lite",
  "futures-rustls",
  "futures-util",
+ "h12tiny-client-normalize",
  "h12tiny-core",
  "http",
  "http-body",
@@ -451,6 +453,24 @@ dependencies = [
  "rustls",
  "rustls-graviola",
  "smol",
+ "webpki-roots",
+]
+
+[[package]]
+name = "h12tiny-client-normalize"
+version = "0.1.0"
+dependencies = [
+ "http",
+]
+
+[[package]]
+name = "h12tiny-client-sync"
+version = "0.1.0"
+dependencies = [
+ "h12tiny-client-normalize",
+ "http",
+ "rustls",
+ "rustls-graviola",
  "webpki-roots",
 ]
 

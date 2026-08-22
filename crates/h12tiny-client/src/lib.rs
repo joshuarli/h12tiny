@@ -661,7 +661,7 @@ where
                 origin: origin.clone(),
                 protocol,
             });
-            if key.0 == http::uri::Scheme::HTTPS {
+            if key.scheme() == &http::uri::Scheme::HTTPS {
                 events.record(DebugEvent::AlpnSelected { origin, protocol });
             }
         }
