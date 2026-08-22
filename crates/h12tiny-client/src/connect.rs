@@ -210,9 +210,10 @@ pub struct ConnectorBuilder {
 /// [`ClientTlsConfigBuilder::new`] uses h12tiny's Graviola provider, the
 /// WebPKI roots, no client certificate, and ALPN offerings for HTTP/2 then
 /// HTTP/1.1. Callers can replace the root store, ALPN list, or client
-/// authentication while retaining that explicit provider. Applications with a
-/// different Rustls provider can use [`ClientTlsConfigBuilder::with_provider`]
-/// instead; this is useful when several Rustls consumers share one process.
+/// authentication, or restrict TLS protocol versions while retaining that
+/// explicit provider. Applications with a different Rustls provider can use
+/// [`ClientTlsConfigBuilder::with_provider`] instead; this is useful when
+/// several Rustls consumers share one process.
 ///
 /// For policies requiring a custom verifier or other Rustls-only settings,
 /// construct a [`rustls::ClientConfig`] directly and pass it to
@@ -222,6 +223,7 @@ pub struct ClientTlsConfigBuilder {
     provider: Arc<rustls::crypto::CryptoProvider>,
     roots: rustls::RootCertStore,
     alpn_protocols: Vec<Vec<u8>>,
+    protocol_versions: Option<Vec<&'static rustls::SupportedProtocolVersion>>,
     client_auth: ClientAuthentication,
 }
 
@@ -254,6 +256,7 @@ impl ClientTlsConfigBuilder {
                 webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
             ),
             alpn_protocols: vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+            protocol_versions: None,
             client_auth: ClientAuthentication::None,
         }
     }
@@ -285,6 +288,19 @@ impl ClientTlsConfigBuilder {
         self
     }
 
+    /// Restricts TLS negotiation to exactly these protocol versions.
+    ///
+    /// By default, Rustls' safe protocol versions supported by the selected
+    /// provider are used. Supplying an empty list makes [`Self::build`] return
+    /// a Rustls configuration error rather than silently broadening policy.
+    pub fn protocol_versions(
+        mut self,
+        versions: impl IntoIterator<Item = &'static rustls::SupportedProtocolVersion>,
+    ) -> Self {
+        self.protocol_versions = Some(versions.into_iter().collect());
+        self
+    }
+
     /// Configures no TLS client authentication, which is the default.
     pub fn no_client_auth(mut self) -> Self {
         self.client_auth = ClientAuthentication::None;
@@ -306,8 +322,11 @@ impl ClientTlsConfigBuilder {
 
     /// Finishes the Rustls configuration.
     pub fn build(self) -> Result<rustls::ClientConfig, rustls::Error> {
-        let builder = rustls::ClientConfig::builder_with_provider(self.provider)
-            .with_safe_default_protocol_versions()?;
+        let builder = rustls::ClientConfig::builder_with_provider(self.provider);
+        let builder = match self.protocol_versions {
+            Some(versions) => builder.with_protocol_versions(&versions)?,
+            None => builder.with_safe_default_protocol_versions()?,
+        };
         let mut config = match self.client_auth {
             ClientAuthentication::None => builder
                 .with_root_certificates(self.roots)
@@ -663,6 +682,17 @@ mod tests {
     fn tls_builder_accepts_an_explicit_provider() {
         let provider = Arc::new(rustls_graviola::default_provider());
         let config = ClientTlsConfigBuilder::with_provider(provider)
+            .build()
+            .unwrap();
+
+        assert_eq!(config.alpn_protocols, vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn tls_builder_accepts_explicit_protocol_versions() {
+        let config = ClientTlsConfigBuilder::new()
+            .protocol_versions([&rustls::version::TLS13])
             .build()
             .unwrap();
 

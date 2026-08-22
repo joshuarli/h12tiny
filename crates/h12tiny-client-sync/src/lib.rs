@@ -210,6 +210,7 @@ impl Builder {
 pub struct ClientTlsConfigBuilder {
     provider: std::sync::Arc<rustls::crypto::CryptoProvider>,
     roots: rustls::RootCertStore,
+    protocol_versions: Option<Vec<&'static rustls::SupportedProtocolVersion>>,
     client_auth: ClientAuthentication,
 }
 
@@ -236,6 +237,7 @@ impl ClientTlsConfigBuilder {
             roots: rustls::RootCertStore::from_iter(
                 webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
             ),
+            protocol_versions: None,
             client_auth: ClientAuthentication::None,
         }
     }
@@ -253,6 +255,19 @@ impl ClientTlsConfigBuilder {
     ) -> Result<Self, rustls::Error> {
         self.roots.add(certificate)?;
         Ok(self)
+    }
+
+    /// Restricts TLS negotiation to exactly these protocol versions.
+    ///
+    /// By default, Rustls' safe protocol versions supported by the selected
+    /// provider are used. Supplying an empty list makes [`Self::build`] return
+    /// a Rustls configuration error rather than silently broadening policy.
+    pub fn protocol_versions(
+        mut self,
+        versions: impl IntoIterator<Item = &'static rustls::SupportedProtocolVersion>,
+    ) -> Self {
+        self.protocol_versions = Some(versions.into_iter().collect());
+        self
     }
 
     /// Configures no TLS client authentication, which is the default.
@@ -276,8 +291,11 @@ impl ClientTlsConfigBuilder {
 
     /// Finishes a configuration that can negotiate HTTP/1.1 only.
     pub fn build(self) -> Result<rustls::ClientConfig, rustls::Error> {
-        let builder = rustls::ClientConfig::builder_with_provider(self.provider)
-            .with_safe_default_protocol_versions()?;
+        let builder = rustls::ClientConfig::builder_with_provider(self.provider);
+        let builder = match self.protocol_versions {
+            Some(versions) => builder.with_protocol_versions(&versions)?,
+            None => builder.with_safe_default_protocol_versions()?,
+        };
         let mut config = match self.client_auth {
             ClientAuthentication::None => builder
                 .with_root_certificates(self.roots)

@@ -21,7 +21,7 @@ use async_net::TcpListener;
 use bytes::Bytes;
 use futures_rustls::TlsAcceptor;
 use futures_util::{stream, StreamExt};
-use h12tiny::client::{Client, Connector};
+use h12tiny::client::{Client, ClientTlsConfigBuilder, Connector};
 use h12tiny::io::FuturesIo;
 use h12tiny::runtime::BoxExecutor;
 use h12tiny::server::conn::auto;
@@ -387,7 +387,7 @@ fn oversized_bounded_response_does_not_poison_the_next_pooled_request() {
 }
 
 #[test]
-fn custom_rustls_config_uses_client_certificate_and_custom_root() {
+fn client_tls_builder_uses_client_certificate_custom_root_and_protocol_policy() {
     smol::block_on(async {
         use futures_rustls::pki_types::{CertificateDer, PrivateKeyDer};
         use rustls::server::WebPkiClientVerifier;
@@ -399,19 +399,19 @@ fn custom_rustls_config_uses_client_certificate_and_custom_root() {
         client_roots
             .add(certificate.clone())
             .expect("fixture certificate is a valid client root");
-        let provider = Arc::new(rustls_graviola::default_provider());
-        let mut client_config = rustls::ClientConfig::builder_with_provider(provider.clone())
-            .with_safe_default_protocol_versions()
-            .expect("Graviola supports Rustls' safe default protocol versions")
-            .with_root_certificates(client_roots)
-            .with_client_auth_cert(vec![certificate.clone()], key.clone_key())
+        let client_config = ClientTlsConfigBuilder::new()
+            .root_certificates(client_roots)
+            .client_auth(vec![certificate.clone()], key.clone_key())
+            .alpn_protocols([b"http/1.1".to_vec()])
+            .protocol_versions([&rustls::version::TLS13])
+            .build()
             .expect("fixture cert and key are a client identity");
-        client_config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
         let mut server_roots = rustls::RootCertStore::empty();
         server_roots
             .add(certificate.clone())
             .expect("fixture certificate is a valid server root");
+        let provider = Arc::new(rustls_graviola::default_provider());
         let verifier = WebPkiClientVerifier::builder_with_provider(
             Arc::new(server_roots),
             provider.clone(),

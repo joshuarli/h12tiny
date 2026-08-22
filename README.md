@@ -96,9 +96,9 @@ TLS uses `rustls` with the pure-Rust Graviola provider from
 native-tls backend is enabled. The built-in client selects Graviola explicitly.
 `h12tiny_client::ClientTlsConfigBuilder` and
 `h12tiny_client_sync::ClientTlsConfigBuilder` expose those same defaults for
-custom root stores, mutual TLS, and ALPN, without installing or consulting a
-process-global Rustls provider or disabling an embedding application's default
-provider. Applications that construct their own
+custom root stores, mutual TLS, ALPN, and protocol-version policy without
+installing or consulting a process-global Rustls provider or disabling an
+embedding application's default provider. Applications that construct their own
 `rustls::ClientConfig` or `rustls::ServerConfig` should likewise select a
 provider per configuration:
 
