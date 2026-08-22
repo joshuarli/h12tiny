@@ -7,7 +7,7 @@ use std::task::{Context, Poll};
 
 use async_net::TcpListener;
 use bytes::Bytes;
-use h12tiny::client::Client;
+use h12tiny::client::{Client, ConnectionProtocol, ResponseInfo};
 use h12tiny::io::FuturesIo;
 use h12tiny::runtime::{BoxExecutor, BoxSendFuture};
 use h12tiny::server::conn::auto;
@@ -70,7 +70,7 @@ fn h1_client_and_auto_server_interoperate_over_plaintext() {
         });
 
         let client = Client::builder(SmolExecutor).build::<EmptyBody>();
-        let response = client
+        let first = client
             .request(
                 Request::builder()
                     .uri(format!("http://{address}/http1"))
@@ -79,8 +79,30 @@ fn h1_client_and_auto_server_interoperate_over_plaintext() {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        drop(response);
+        assert_eq!(first.status(), StatusCode::OK);
+        let first_info = *ResponseInfo::from_response(&first).unwrap();
+        assert!(!first_info.reused());
+        assert_eq!(first_info.connection().protocol(), ConnectionProtocol::Http1);
+        assert_eq!(first_info.connection().peer_addr(), Some(address));
+        assert!(first_info.connection().local_addr().is_some());
+        assert!(first_info.connection().connect_duration().is_some());
+        assert!(first_info.connection().handshake_duration().is_some());
+        drop(first);
+
+        let second = client
+            .request(
+                Request::builder()
+                    .uri(format!("http://{address}/http1-again"))
+                    .body(EmptyBody)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        let second_info = *ResponseInfo::from_response(&second).unwrap();
+        assert!(second_info.reused());
+        assert_eq!(second_info.connection(), first_info.connection());
+        drop(second);
         drop(client);
         server.await;
     });

@@ -16,7 +16,7 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::future::Future;
 use std::io;
-use std::net::{TcpStream as StdTcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream as StdTcpStream, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,6 +49,7 @@ type BoxedIo = Box<dyn ConnectionIo>;
 pub struct Connected {
     pub(crate) io: BoxedIo,
     pub(crate) protocol: super::ConnectionProtocol,
+    pub(crate) info: super::ConnectionInfo,
 }
 
 impl Connected {
@@ -60,12 +61,28 @@ impl Connected {
         Self {
             io: Box::new(io),
             protocol,
+            info: super::ConnectionInfo::new(protocol),
         }
     }
 
     /// Returns the protocol capability selected during establishment.
     pub fn protocol(&self) -> super::ConnectionProtocol {
         self.protocol
+    }
+
+    /// Attaches socket addresses known by a custom transport.
+    ///
+    /// Default TCP connections populate these values automatically. Custom
+    /// dialers can call this before returning the connection so the client
+    /// records the same information in [`super::ResponseInfo`].
+    pub fn with_addresses(
+        mut self,
+        local_addr: Option<SocketAddr>,
+        peer_addr: Option<SocketAddr>,
+    ) -> Self {
+        self.info.local_addr = local_addr;
+        self.info.peer_addr = peer_addr;
+        self
     }
 }
 
@@ -414,14 +431,16 @@ impl Connector {
                 let stream = connect_tcp(&host, uri.port_u16().unwrap_or(80))
                     .await
                     .map_err(Error::Connect)?;
-                Ok(Connected {
-                    io: Box::new(FuturesIo(stream)),
-                    protocol: if require_h2 {
+                let (local_addr, peer_addr) = socket_addresses(&stream);
+                Ok(Connected::new(
+                    FuturesIo(stream),
+                    if require_h2 {
                         super::ConnectionProtocol::Http2
                     } else {
                         super::ConnectionProtocol::Http1
                     },
-                })
+                )
+                .with_addresses(local_addr, peer_addr))
             }
             "https" => {
                 self.connect_tls(host, uri.port_u16().unwrap_or(443), require_h2)
@@ -439,6 +458,7 @@ impl Connector {
         require_h2: bool,
     ) -> Result<Connected, Error> {
         let stream = connect_tcp(&host, port).await.map_err(Error::Connect)?;
+        let (local_addr, peer_addr) = socket_addresses(&stream);
         let server_name = futures_rustls::pki_types::ServerName::try_from(host.clone())
             .map_err(|_| Error::InvalidServerName(host))?;
         let tls = self
@@ -452,10 +472,7 @@ impl Connector {
             None => return Err(Error::RequiredHttp2NotNegotiated),
             Some(other) => return Err(Error::UnexpectedAlpn(other.to_vec())),
         };
-        Ok(Connected {
-            io: Box::new(FuturesIo(tls)),
-            protocol,
-        })
+        Ok(Connected::new(FuturesIo(tls), protocol).with_addresses(local_addr, peer_addr))
     }
 
     #[cfg(not(feature = "tls"))]
@@ -485,6 +502,10 @@ async fn connect_tcp(host: &str, port: u16) -> io::Result<Async<StdTcpStream>> {
             "could not connect to any of the addresses",
         )
     }))
+}
+
+fn socket_addresses(stream: &Async<StdTcpStream>) -> (Option<SocketAddr>, Option<SocketAddr>) {
+    (stream.get_ref().local_addr().ok(), stream.get_ref().peer_addr().ok())
 }
 
 impl ConnectorBuilder {

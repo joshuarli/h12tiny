@@ -13,10 +13,11 @@ mod pool;
 use std::error::Error as StdError;
 use std::fmt;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::future::{self, Either};
 use http::{Method, Request, Response, Version};
@@ -108,6 +109,89 @@ impl StdError for Error {
 pub enum ConnectionProtocol {
     Http1,
     Http2,
+}
+
+/// Immutable facts about the connection that produced a response.
+///
+/// Default TCP connections populate both socket addresses. Custom [`Dialer`]
+/// implementations can attach addresses through [`Connected::with_addresses`]
+/// when their transport has that information. `connect_duration` covers the
+/// whole connector operation, including default DNS, TCP, and TLS work;
+/// `handshake_duration` covers h12tiny's HTTP/1 or HTTP/2 session handshake.
+/// Neither duration includes request dispatch, response-header latency, or
+/// response-body consumption.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConnectionInfo {
+    protocol: ConnectionProtocol,
+    local_addr: Option<SocketAddr>,
+    peer_addr: Option<SocketAddr>,
+    connect_duration: Option<Duration>,
+    handshake_duration: Option<Duration>,
+}
+
+impl ConnectionInfo {
+    pub(crate) const fn new(protocol: ConnectionProtocol) -> Self {
+        Self {
+            protocol,
+            local_addr: None,
+            peer_addr: None,
+            connect_duration: None,
+            handshake_duration: None,
+        }
+    }
+
+    /// Returns the HTTP capability negotiated for this connection.
+    pub const fn protocol(self) -> ConnectionProtocol {
+        self.protocol
+    }
+
+    /// Returns the local socket address when the connector reported one.
+    pub const fn local_addr(self) -> Option<SocketAddr> {
+        self.local_addr
+    }
+
+    /// Returns the peer socket address when the connector reported one.
+    pub const fn peer_addr(self) -> Option<SocketAddr> {
+        self.peer_addr
+    }
+
+    /// Returns the complete connection-establishment duration when measured.
+    pub const fn connect_duration(self) -> Option<Duration> {
+        self.connect_duration
+    }
+
+    /// Returns the HTTP session-handshake duration when measured.
+    pub const fn handshake_duration(self) -> Option<Duration> {
+        self.handshake_duration
+    }
+}
+
+/// Per-response transport information stored in a response extension.
+///
+/// Read it with [`ResponseInfo::from_response`] immediately or after body
+/// consumption; response extensions outlive the streaming body. It is
+/// intentionally a narrow transport fact, not an application metrics API.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResponseInfo {
+    connection: ConnectionInfo,
+    reused: bool,
+}
+
+impl ResponseInfo {
+    /// Returns h12tiny's transport information attached to `response`.
+    pub fn from_response<B>(response: &Response<B>) -> Option<&Self> {
+        response.extensions().get()
+    }
+
+    /// Returns the connection that produced this response.
+    pub const fn connection(self) -> ConnectionInfo {
+        self.connection
+    }
+
+    /// Reports whether this request checked out a previously pooled session.
+    pub const fn reused(self) -> bool {
+        self.reused
+    }
 }
 
 /// A discrete endpoint-lifecycle observation recorded by [`DebugEventLog`].
@@ -330,7 +414,11 @@ where
             normalize::normalize_h1_request(&mut request, self.config.set_host);
         }
 
-        let response = match pooled.try_send_request(request).await {
+        let response_info = ResponseInfo {
+            connection: pooled.connection_info,
+            reused: pooled.is_reused(),
+        };
+        let mut response = match pooled.try_send_request(request).await {
             Ok(response) => response,
             Err(mut error) => {
                 if let Some(request) = error.take_message() {
@@ -346,6 +434,7 @@ where
                 )));
             }
         };
+        response.extensions_mut().insert(response_info);
 
         // Hyper's H1 sender becomes reusable only once its connection driver
         // says it is ready again. Retaining this `Pooled` value in a driver
@@ -420,6 +509,7 @@ where
             .pool
             .connecting(&key, self.config.protocol)
             .ok_or_else(|| Error::new(ErrorKind::Canceled))?;
+        let connect_started = Instant::now();
         let connected = match self
             .connector
             .connect(
@@ -433,6 +523,10 @@ where
                 let kind = error.client_error_kind();
                 return Err(Error::with_source(kind, error));
             }
+        };
+        let connection_info = ConnectionInfo {
+            connect_duration: Some(connect_started.elapsed()),
+            ..connected.info
         };
 
         if let Some(events) = &self.debug_events {
@@ -454,11 +548,17 @@ where
                 .ok_or_else(|| Error::new(ErrorKind::Canceled))?;
         }
 
-        let connection = self.handshake(connected).await?;
+        let handshake_started = Instant::now();
+        let mut connection = self.handshake(connected, connection_info).await?;
+        connection.connection_info.handshake_duration = Some(handshake_started.elapsed());
         Ok(self.pool.pooled(connecting, connection))
     }
 
-    async fn handshake(&self, connected: Connected) -> Result<PoolClient<B>, Error> {
+    async fn handshake(
+        &self,
+        connected: Connected,
+        connection_info: ConnectionInfo,
+    ) -> Result<PoolClient<B>, Error> {
         match connected.protocol {
             ConnectionProtocol::Http1 => {
                 #[cfg(feature = "http1")]
@@ -477,6 +577,7 @@ where
                         .map_err(|error| Error::with_source(ErrorKind::Handshake, error))?;
                     return Ok(PoolClient {
                         sender: Sender::Http1(sender),
+                        connection_info,
                     });
                 }
                 #[cfg(not(feature = "http1"))]
@@ -502,6 +603,7 @@ where
                         .map_err(|error| Error::with_source(ErrorKind::Handshake, error))?;
                     return Ok(PoolClient {
                         sender: Sender::Http2(sender),
+                        connection_info,
                     });
                 }
                 #[cfg(not(feature = "http2"))]
@@ -552,6 +654,7 @@ enum ConnectionError {
 
 struct PoolClient<B> {
     sender: Sender<B>,
+    connection_info: ConnectionInfo,
 }
 
 enum Sender<B> {
@@ -627,14 +730,17 @@ where
             #[cfg(feature = "http1")]
             Sender::Http1(sender) => Reservation::Unique(Self {
                 sender: Sender::Http1(sender),
+                connection_info: self.connection_info,
             }),
             #[cfg(feature = "http2")]
             Sender::Http2(sender) => Reservation::Shared(
                 Self {
                     sender: Sender::Http2(sender.clone()),
+                    connection_info: self.connection_info,
                 },
                 Self {
                     sender: Sender::Http2(sender),
+                    connection_info: self.connection_info,
                 },
             ),
         }
