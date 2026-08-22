@@ -3,7 +3,7 @@ name = "h12tiny"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
-description = "A small futures-lite HTTP/1.1 and HTTP/2 endpoint layer"
+description = "small http(s) 1 and 2 things"
 license = "MIT"
 repository = "https://github.com/laputa-systems/h12tiny"
 
@@ -20,25 +20,25 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-async-io = "2"
-async-net = "2"
-bytes = "1"
-futures-channel = "0.3"
-futures-io = "0.3"
-futures-lite = { version = "2", default-features = false, features = ["std"] }
-futures-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
-futures-util = { version = "0.3", default-features = false, features = ["async-await", "std"] }
-http = "1"
-http-body = "1"
+async-io = "2.6"
+async-net = "2.0"
+bytes = "1.12.1"
+futures-channel = "0.3.34"
+futures-io = "0.3.34"
+futures-lite = { version = "2.6.1", default-features = false, features = ["std"] }
+futures-rustls = { version = "0.26.0", default-features = false, features = ["tls12"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["async-await", "std"] }
+http = "1.5.0"
+http-body = "1.1.0"
 hyper = { package = "laputa-hyper-futures-lite", version = "=1.11.0-beta.0", default-features = false }
-pin-project-lite = "0.2"
+pin-project-lite = "0.2.17"
 # h12tiny builds every TLS config with `builder_with_provider`, selecting
 # Graviola explicitly. Do not enable Rustls' `custom-provider` feature: Cargo
 # feature unification would otherwise disable another library's unambiguous
 # ring or aws-lc-rs default in the same process.
-rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
-rustls-graviola = { version = "0.4", default-features = false }
-webpki-roots = "1"
+rustls = { version = "0.23.43", default-features = false, features = ["std", "tls12"] }
+rustls-graviola = { version = "0.4.0", default-features = false }
+webpki-roots = "1.0.9"
 
 [features]
 # The facade deliberately defaults to no roles or protocols.  Applications can
@@ -80,12 +80,12 @@ name = "h2-reference-server"
 required-features = ["server", "http2"]
 
 [dependencies]
-h12tiny-core = { path = "crates/h12tiny-core", optional = true, default-features = false }
-h12tiny-client = { path = "crates/h12tiny-client", optional = true, default-features = false }
-h12tiny-client-sync = { path = "crates/h12tiny-client-sync", optional = true, default-features = false }
-h12tiny-server = { path = "crates/h12tiny-server", optional = true, default-features = false }
-h12tiny-util = { path = "crates/h12tiny-util", optional = true, default-features = false }
-h12tiny-web = { path = "crates/h12tiny-web", optional = true, default-features = false }
+h12tiny-core = { version = "0.1.0", path = "crates/h12tiny-core", optional = true, default-features = false }
+h12tiny-client = { version = "0.1.0", path = "crates/h12tiny-client", optional = true, default-features = false }
+h12tiny-client-sync = { version = "0.1.0", path = "crates/h12tiny-client-sync", optional = true, default-features = false }
+h12tiny-server = { version = "0.1.0", path = "crates/h12tiny-server", optional = true, default-features = false }
+h12tiny-util = { version = "0.1.0", path = "crates/h12tiny-util", optional = true, default-features = false }
+h12tiny-web = { version = "0.1.0", path = "crates/h12tiny-web", optional = true, default-features = false }
 
 [dev-dependencies]
 async-io = { workspace = true }
@@ -101,7 +101,7 @@ http-body = { workspace = true }
 hyper = { workspace = true, features = ["client", "server", "http1", "http2"] }
 rustls = { workspace = true }
 rustls-graviola = { workspace = true }
-smol = "2"
+smol = "2.0.2"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(h12tiny_unstable)"] }

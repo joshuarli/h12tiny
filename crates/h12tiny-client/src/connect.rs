@@ -12,11 +12,11 @@
 //! cancellation, caching, or lookup protocols can use [`Resolver`] while
 //! retaining h12tiny's TCP, TLS, ALPN, and pooling policy.
 
+use std::collections::VecDeque;
 use std::error::Error as StdError;
 use std::fmt;
 use std::future::Future;
 use std::io;
-use std::collections::VecDeque;
 use std::net::{SocketAddr, TcpStream as StdTcpStream};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -282,9 +282,7 @@ impl Error {
             | Self::Connect(_)
             | Self::Resolve(_)
             | Self::Custom(_)
-            | Self::Timeout => {
-                super::ErrorKind::Connect
-            }
+            | Self::Timeout => super::ErrorKind::Connect,
         }
     }
 }
@@ -610,7 +608,9 @@ impl Connector {
                 let tcp = match tcp {
                     Some(tcp) => tcp,
                     None => {
-                        let stream = self.connect_tcp(&host, uri.port_u16().unwrap_or(80)).await?;
+                        let stream = self
+                            .connect_tcp(&host, uri.port_u16().unwrap_or(80))
+                            .await?;
                         let (local_addr, peer_addr) = socket_addresses(&stream);
                         TcpConnected::new(stream).with_addresses(local_addr, peer_addr)
                     }
@@ -823,10 +823,7 @@ impl ConnectorBuilder {
     /// racing and attempts each resolved address serially. This setting
     /// applies only to the default TCP path; custom dialers own address
     /// selection themselves.
-    pub fn happy_eyeballs_timeout(
-        mut self,
-        timeout: impl Into<Option<Duration>>,
-    ) -> Self {
+    pub fn happy_eyeballs_timeout(mut self, timeout: impl Into<Option<Duration>>) -> Self {
         self.connector.happy_eyeballs_timeout = timeout.into();
         self
     }
@@ -906,8 +903,8 @@ fn default_tls_config() -> rustls::ClientConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::net::TcpListener;
     use std::net::SocketAddr;
+    use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -915,8 +912,8 @@ mod tests {
     #[cfg(feature = "tls")]
     use super::ClientTlsConfigBuilder;
     use super::{
-        Connector, DialFuture, Dialer, Error, ResolveFuture, Resolver, TcpConnected,
-        TcpDialFuture, TcpDialer,
+        Connector, DialFuture, Dialer, Error, ResolveFuture, Resolver, TcpConnected, TcpDialFuture,
+        TcpDialer,
     };
     use http::Uri;
 
@@ -1131,10 +1128,9 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let resolver = RecordingResolver::new([address]);
         let connector = Connector::with_resolver(resolver.clone());
-        let connected = smol::block_on(
-            connector.connect("http://example.test/".parse().unwrap(), false),
-        )
-        .unwrap();
+        let connected =
+            smol::block_on(connector.connect("http://example.test/".parse().unwrap(), false))
+                .unwrap();
 
         assert_eq!(connected.protocol, super::super::ConnectionProtocol::Http1);
         assert_eq!(
@@ -1164,10 +1160,9 @@ mod tests {
             .resolver(resolver.clone())
             .tcp_dialer(LocalTcpDialer)
             .build();
-        let connected = smol::block_on(
-            connector.connect(format!("http://{address}/").parse().unwrap(), false),
-        )
-        .unwrap();
+        let connected =
+            smol::block_on(connector.connect(format!("http://{address}/").parse().unwrap(), false))
+                .unwrap();
 
         assert_eq!(connected.protocol, super::super::ConnectionProtocol::Http1);
         assert!(resolver.requests.lock().unwrap().is_empty());

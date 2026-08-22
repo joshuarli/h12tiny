@@ -6,9 +6,9 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 #[cfg(feature = "http1")]
-use std::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(feature = "http1")]
 use std::sync::Arc;
+#[cfg(feature = "http1")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_net::TcpListener;
@@ -258,12 +258,14 @@ fn cancelling_a_tcp_dialer_request_drops_the_dial_and_allows_a_later_request() {
         let mut builder = Client::builder(SmolExecutor);
         builder.connector(connector);
         let client = builder.build::<FullBody>();
-        let cancelled = smol::spawn(client.clone().request(
-            Request::builder()
-                .uri(format!("http://{address}/cancelled"))
-                .body(FullBody::empty())
-                .unwrap(),
-        ));
+        let cancelled = smol::spawn(
+            client.clone().request(
+                Request::builder()
+                    .uri(format!("http://{address}/cancelled"))
+                    .body(FullBody::empty())
+                    .unwrap(),
+            ),
+        );
         for _ in 0..100 {
             if dialer.calls.load(Ordering::SeqCst) == 1 {
                 break;
@@ -338,19 +340,23 @@ fn h1_connection_limit_queues_same_origin_requests_without_opening_another_socke
         let mut builder = Client::builder(SmolExecutor);
         builder.pool_max_connections_per_host(1);
         let client = builder.build::<FullBody>();
-        let first = smol::spawn(client.clone().request(
-            Request::builder()
-                .uri(format!("http://{address}/one"))
-                .body(FullBody::empty())
-                .unwrap(),
-        ));
+        let first = smol::spawn(
+            client.clone().request(
+                Request::builder()
+                    .uri(format!("http://{address}/one"))
+                    .body(FullBody::empty())
+                    .unwrap(),
+            ),
+        );
         first_received_rx.await.unwrap();
-        let second = smol::spawn(client.clone().request(
-            Request::builder()
-                .uri(format!("http://{address}/two"))
-                .body(FullBody::empty())
-                .unwrap(),
-        ));
+        let second = smol::spawn(
+            client.clone().request(
+                Request::builder()
+                    .uri(format!("http://{address}/two"))
+                    .body(FullBody::empty())
+                    .unwrap(),
+            ),
+        );
 
         release_first_tx.send(()).unwrap();
         let first = first.await.unwrap();

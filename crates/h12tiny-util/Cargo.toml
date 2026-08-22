@@ -17,10 +17,10 @@ futures-util = { workspace = true }
 futures-io = { workspace = true }
 http = { workspace = true }
 http-body = { workspace = true }
-http-body-util = "0.1"
+http-body-util = "0.1.5"
 pin-project-lite = { workspace = true }
-serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+serde_json = { version = "1.0.151", optional = true }
 
 [dev-dependencies]
 futures-lite = { workspace = true }

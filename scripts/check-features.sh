@@ -59,11 +59,11 @@ facade_h1=$(tree -p h12tiny --no-default-features --features client,http1)
 facade_sync_tls=$(tree -p h12tiny --no-default-features --features client-sync,tls)
 facade_websocket=$(tree -p h12tiny --no-default-features --features websocket)
 
-for package in laputa-h2-futures h12tiny-server h12tiny-web rustls serde serde_json tokio; do
+for package in laputa-h2-futures-lite h12tiny-server h12tiny-web rustls serde serde_json tokio; do
     require_absent "$package" "$client_h1" "H1-only client"
 done
 require_present async-net "$client_h1" "H1-only client"
-require_present laputa-h2-futures "$client_h2" "H2-only client"
+require_present laputa-h2-futures-lite "$client_h2" "H2-only client"
 require_present async-net "$client_h2" "H2-only client"
 for package in h12tiny-server h12tiny-web serde serde_json tokio; do
     require_absent "$package" "$client_h2" "H2-only client"
@@ -72,23 +72,23 @@ require_present rustls "$client_h1_tls" "TLS H1 client"
 require_present rustls-graviola "$client_h1_tls" "TLS H1 client"
 require_present graviola "$client_h1_tls" "TLS H1 client"
 require_present async-net "$client_h1_tls" "TLS H1 client"
-for package in async-io async-net futures-channel futures-core futures-io futures-lite futures-rustls futures-util laputa-hyper-futures-lite laputa-h2-futures h12tiny-core rustls serde serde_json tokio; do
+for package in async-io async-net futures-channel futures-core futures-io futures-lite futures-rustls futures-util laputa-hyper-futures-lite laputa-h2-futures-lite h12tiny-core rustls serde serde_json tokio; do
     require_absent "$package" "$sync_client_plain" "plain sync client"
 done
 require_present rustls "$sync_client_tls" "TLS sync client"
 require_present rustls-graviola "$sync_client_tls" "TLS sync client"
 require_present graviola "$sync_client_tls" "TLS sync client"
-for package in async-io async-net futures-channel futures-core futures-io futures-lite futures-rustls futures-util laputa-hyper-futures-lite laputa-h2-futures h12tiny-core serde serde_json tokio; do
+for package in async-io async-net futures-channel futures-core futures-io futures-lite futures-rustls futures-util laputa-hyper-futures-lite laputa-h2-futures-lite h12tiny-core serde serde_json tokio; do
     require_absent "$package" "$sync_client_tls" "TLS sync client"
 done
 require_present rustls "$server_h1_tls" "TLS H1 server"
 require_present rustls-graviola "$server_h1_tls" "TLS H1 server"
 require_present graviola "$server_h1_tls" "TLS H1 server"
 
-for package in laputa-h2-futures h12tiny-client h12tiny-web serde serde_json tokio; do
+for package in laputa-h2-futures-lite h12tiny-client h12tiny-web serde serde_json tokio; do
     require_absent "$package" "$server_h1" "H1-only server"
 done
-require_present laputa-h2-futures "$server_h2" "H2-only server"
+require_present laputa-h2-futures-lite "$server_h2" "H2-only server"
 for package in h12tiny-client h12tiny-web serde serde_json tokio; do
     require_absent "$package" "$server_h2" "H2-only server"
 done
@@ -105,13 +105,13 @@ done
 for package in base64 laputa-fastwebsockets-futures-lite sha1; do
     require_present "$package" "$facade_websocket" "facade WebSocket feature"
 done
-for package in laputa-h2-futures h12tiny-server h12tiny-web rustls serde serde_json tokio; do
+for package in laputa-h2-futures-lite h12tiny-server h12tiny-web rustls serde serde_json tokio; do
     require_absent "$package" "$facade_h1" "facade H1-only client"
 done
 require_present async-net "$facade_h1" "facade H1-only client"
 require_present h12tiny-client-sync "$facade_sync_tls" "facade TLS sync client"
 require_present rustls "$facade_sync_tls" "facade TLS sync client"
-for package in async-io async-net futures-channel futures-core futures-io futures-lite futures-rustls futures-util laputa-hyper-futures-lite laputa-h2-futures h12tiny-client h12tiny-core h12tiny-server h12tiny-web serde serde_json tokio; do
+for package in async-io async-net futures-channel futures-core futures-io futures-lite futures-rustls futures-util laputa-hyper-futures-lite laputa-h2-futures-lite h12tiny-client h12tiny-core h12tiny-server h12tiny-web serde serde_json tokio; do
     require_absent "$package" "$facade_sync_tls" "facade TLS sync client"
 done
 
