@@ -15,6 +15,7 @@ tls = ["dep:futures-rustls", "dep:rustls", "dep:rustls-graviola", "dep:webpki-ro
 [dependencies]
 async-io = { workspace = true, optional = true }
 futures-channel = { workspace = true }
+futures-io = { workspace = true }
 futures-rustls = { workspace = true, optional = true }
 futures-util = { workspace = true }
 h12tiny-core = { path = "../h12tiny-core", default-features = false }

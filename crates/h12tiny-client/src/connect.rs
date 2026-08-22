@@ -40,6 +40,52 @@ impl<T> ConnectionIo for T where T: hyper::rt::Read + hyper::rt::Write + Send + 
 
 type BoxedIo = Box<dyn ConnectionIo>;
 
+/// A TCP stream supplied by a custom [`TcpDialer`].
+///
+/// The stream is deliberately a futures-I/O stream rather than a Hyper
+/// runtime stream. h12tiny wraps it at the HTTP boundary, after it has
+/// retained ownership of TLS, ALPN, and HTTP protocol selection.
+pub trait TcpConnectionIo: futures_io::AsyncRead + futures_io::AsyncWrite + Send + Unpin {}
+
+impl<T> TcpConnectionIo for T where
+    T: futures_io::AsyncRead + futures_io::AsyncWrite + Send + Unpin
+{
+}
+
+type BoxedTcpIo = Box<dyn TcpConnectionIo>;
+
+/// A successful custom TCP establishment.
+pub struct TcpConnected {
+    io: BoxedTcpIo,
+    local_addr: Option<SocketAddr>,
+    peer_addr: Option<SocketAddr>,
+}
+
+impl TcpConnected {
+    /// Wrap a caller-established futures-I/O TCP stream.
+    pub fn new<T>(io: T) -> Self
+    where
+        T: TcpConnectionIo + 'static,
+    {
+        Self {
+            io: Box::new(io),
+            local_addr: None,
+            peer_addr: None,
+        }
+    }
+
+    /// Attaches socket addresses known by a custom transport.
+    pub fn with_addresses(
+        mut self,
+        local_addr: Option<SocketAddr>,
+        peer_addr: Option<SocketAddr>,
+    ) -> Self {
+        self.local_addr = local_addr;
+        self.peer_addr = peer_addr;
+        self
+    }
+}
+
 /// A successful custom connection establishment.
 ///
 /// The caller declares the HTTP capability selected by its transport. A
@@ -92,6 +138,10 @@ pub type DialError = Box<dyn StdError + Send + Sync>;
 /// Future returned by [`Dialer::connect`].
 pub type DialFuture = Pin<Box<dyn Future<Output = Result<Connected, DialError>> + Send + 'static>>;
 
+/// Future returned by [`TcpDialer::connect`].
+pub type TcpDialFuture =
+    Pin<Box<dyn Future<Output = Result<TcpConnected, DialError>> + Send + 'static>>;
+
 /// Replaces only connection establishment while retaining the client's origin
 /// normalization, protocol handshake, and per-origin pool.
 ///
@@ -102,6 +152,17 @@ pub type DialFuture = Pin<Box<dyn Future<Output = Result<Connected, DialError>> 
 /// cannot implement hidden proxy, redirect, or retry policy.
 pub trait Dialer: Send + Sync + 'static {
     fn connect(&self, origin: Uri, require_http2: bool) -> DialFuture;
+}
+
+/// Replaces only capability-aware TCP establishment.
+///
+/// h12tiny receives the normalized absolute origin, while the caller retains
+/// ownership of DNS and socket policy. For `https` origins h12tiny then runs
+/// the returned stream through its configured Rustls client, selects ALPN, and
+/// performs the HTTP/1 or HTTP/2 handshake. The dialer must not perform TLS or
+/// HTTP negotiation itself.
+pub trait TcpDialer: Send + Sync + 'static {
+    fn connect(&self, origin: Uri) -> TcpDialFuture;
 }
 
 #[derive(Debug)]
@@ -186,13 +247,14 @@ pub struct Connector {
     connect_timeout: Option<Duration>,
     timer: Arc<dyn Timer + Send + Sync>,
     #[cfg(feature = "tls")]
-    tls: futures_rustls::TlsConnector,
+    tls: Arc<rustls::ClientConfig>,
 }
 
 #[derive(Clone)]
 enum ConnectorKind {
     Default,
     Custom(Arc<dyn Dialer>),
+    Tcp(Arc<dyn TcpDialer>),
 }
 
 /// Small builder for connection-establishment policy.
@@ -389,6 +451,25 @@ impl Connector {
         Self::builder().dialer(dialer).build()
     }
 
+    /// Uses a caller-provided futures-I/O TCP establishment path while
+    /// retaining h12tiny's TLS, ALPN, protocol, and pooling policy.
+    pub fn with_tcp_dialer<D>(dialer: D) -> Self
+    where
+        D: TcpDialer,
+    {
+        Self::builder().tcp_dialer(dialer).build()
+    }
+
+    #[cfg(feature = "tls")]
+    pub(crate) fn force_http1(&mut self) {
+        let mut config = (*self.tls).clone();
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        self.tls = Arc::new(config);
+    }
+
+    #[cfg(not(feature = "tls"))]
+    pub(crate) fn force_http1(&mut self) {}
+
     /// Uses an explicit Rustls client policy. This is the intended hook for
     /// test root stores and private PKI; certificate validation remains owned
     /// by Rustls.
@@ -398,7 +479,7 @@ impl Connector {
             kind: ConnectorKind::Default,
             connect_timeout: None,
             timer: Arc::new(AsyncIoTimer),
-            tls: futures_rustls::TlsConnector::from(std::sync::Arc::new(config)),
+            tls: Arc::new(config),
         }
     }
 
@@ -445,14 +526,31 @@ impl Connector {
         let scheme = uri
             .scheme_str()
             .ok_or_else(|| Error::UnsupportedScheme("".to_owned()))?;
+        let tcp = match &self.kind {
+            ConnectorKind::Tcp(dialer) => {
+                Some(dialer.connect(uri.clone()).await.map_err(Error::Custom)?)
+            }
+            ConnectorKind::Default | ConnectorKind::Custom(_) => None,
+        };
         match scheme {
             "http" => {
-                let stream = connect_tcp(&host, uri.port_u16().unwrap_or(80))
-                    .await
-                    .map_err(Error::Connect)?;
-                let (local_addr, peer_addr) = socket_addresses(&stream);
+                let tcp = match tcp {
+                    Some(tcp) => tcp,
+                    None => {
+                        let stream = connect_tcp(&host, uri.port_u16().unwrap_or(80))
+                            .await
+                            .map_err(Error::Connect)?;
+                        let (local_addr, peer_addr) = socket_addresses(&stream);
+                        TcpConnected::new(stream).with_addresses(local_addr, peer_addr)
+                    }
+                };
+                let TcpConnected {
+                    io,
+                    local_addr,
+                    peer_addr,
+                } = tcp;
                 Ok(Connected::new(
-                    FuturesIo(stream),
+                    FuturesIo::new(io),
                     if require_h2 {
                         super::ConnectionProtocol::Http2
                     } else {
@@ -462,7 +560,12 @@ impl Connector {
                 .with_addresses(local_addr, peer_addr))
             }
             "https" => {
-                self.connect_tls(host, uri.port_u16().unwrap_or(443), require_h2)
+                self.connect_tls(
+                    host,
+                    uri.port_u16().unwrap_or(443),
+                    require_h2,
+                    tcp,
+                )
                     .await
             }
             other => Err(Error::UnsupportedScheme(other.to_owned())),
@@ -475,14 +578,28 @@ impl Connector {
         host: String,
         port: u16,
         require_h2: bool,
+        custom_tcp: Option<TcpConnected>,
     ) -> Result<Connected, Error> {
-        let stream = connect_tcp(&host, port).await.map_err(Error::Connect)?;
-        let (local_addr, peer_addr) = socket_addresses(&stream);
+        let tcp = match custom_tcp {
+            Some(tcp) => tcp,
+            None => {
+                let stream = connect_tcp(&host, port).await.map_err(Error::Connect)?;
+                let (local_addr, peer_addr) = socket_addresses(&stream);
+                TcpConnected::new(stream).with_addresses(local_addr, peer_addr)
+            }
+        };
+        let TcpConnected {
+            io,
+            local_addr,
+            peer_addr,
+        } = tcp;
         let server_name = futures_rustls::pki_types::ServerName::try_from(host.clone())
             .map_err(|_| Error::InvalidServerName(host))?;
         let tls = self
             .tls
-            .connect(server_name, stream)
+            .clone();
+        let tls = futures_rustls::TlsConnector::from(tls)
+            .connect(server_name, io)
             .await
             .map_err(Error::Tls)?;
         let protocol = match tls.get_ref().1.alpn_protocol() {
@@ -491,11 +608,17 @@ impl Connector {
             None => return Err(Error::RequiredHttp2NotNegotiated),
             Some(other) => return Err(Error::UnexpectedAlpn(other.to_vec())),
         };
-        Ok(Connected::new(FuturesIo(tls), protocol).with_addresses(local_addr, peer_addr))
+        Ok(Connected::new(FuturesIo::new(tls), protocol).with_addresses(local_addr, peer_addr))
     }
 
     #[cfg(not(feature = "tls"))]
-    async fn connect_tls(&self, _: String, _: u16, _: bool) -> Result<Connected, Error> {
+    async fn connect_tls(
+        &self,
+        _: String,
+        _: u16,
+        _: bool,
+        _: Option<TcpConnected>,
+    ) -> Result<Connected, Error> {
         Err(Error::TlsDisabled)
     }
 }
@@ -537,6 +660,16 @@ impl ConnectorBuilder {
         self
     }
 
+    /// Replaces DNS/TCP establishment while retaining h12tiny's TLS,
+    /// ALPN, protocol selection, and pooling.
+    pub fn tcp_dialer<D>(mut self, dialer: D) -> Self
+    where
+        D: TcpDialer,
+    {
+        self.connector.kind = ConnectorKind::Tcp(Arc::new(dialer));
+        self
+    }
+
     /// Limits connection establishment after the default resolver yields,
     /// including TCP and TLS. The default resolver uses synchronous
     /// `ToSocketAddrs`, so this timer cannot preempt a DNS lookup that blocks
@@ -561,7 +694,7 @@ impl ConnectorBuilder {
     /// Uses an explicit Rustls client policy for the default dialer.
     #[cfg(feature = "tls")]
     pub fn tls_config(mut self, config: rustls::ClientConfig) -> Self {
-        self.connector.tls = futures_rustls::TlsConnector::from(Arc::new(config));
+        self.connector.tls = Arc::new(config);
         self
     }
 
@@ -597,7 +730,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use super::{Connector, DialFuture, Dialer, Error};
+    use super::{
+        Connector, DialFuture, Dialer, Error, TcpConnected, TcpDialFuture, TcpDialer,
+    };
     #[cfg(feature = "tls")]
     use super::ClientTlsConfigBuilder;
     use http::Uri;
@@ -617,6 +752,31 @@ mod tests {
     impl Dialer for PendingDialer {
         fn connect(&self, _: Uri, _: bool) -> DialFuture {
             Box::pin(std::future::pending())
+        }
+    }
+
+    struct PendingTcpDialer;
+
+    impl TcpDialer for PendingTcpDialer {
+        fn connect(&self, _: Uri) -> TcpDialFuture {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct LocalTcpDialer;
+
+    impl TcpDialer for LocalTcpDialer {
+        fn connect(&self, origin: Uri) -> TcpDialFuture {
+            let host = origin.host().unwrap().to_owned();
+            let port = origin.port_u16().unwrap();
+            Box::pin(async move {
+                let address = format!("{host}:{port}").parse::<std::net::SocketAddr>()?;
+                async_io::Async::<std::net::TcpStream>::connect(address)
+                    .await
+                    .map(TcpConnected::new)
+                    .map_err(|error| Box::new(error) as _)
+            })
         }
     }
 
@@ -645,6 +805,31 @@ mod tests {
     }
 
     #[test]
+    fn connect_timeout_cancels_a_pending_tcp_dialer() {
+        let connector = Connector::builder()
+            .tcp_dialer(PendingTcpDialer)
+            .connect_timeout(Duration::ZERO)
+            .build();
+        let result = smol::block_on(
+            connector.connect("http://example.test/".parse().unwrap(), false),
+        );
+        assert!(matches!(result, Err(Error::Timeout)));
+    }
+
+    #[test]
+    fn custom_tcp_dialer_returns_a_futures_io_stream_to_h12tiny() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let connector = Connector::with_tcp_dialer(LocalTcpDialer);
+        let connected = smol::block_on(
+            connector.connect(format!("http://{address}/").parse().unwrap(), false),
+        )
+        .unwrap();
+
+        assert_eq!(connected.protocol, super::super::ConnectionProtocol::Http1);
+    }
+
+    #[test]
     fn default_tcp_connector_resolves_and_connects_without_async_net() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -655,6 +840,15 @@ mod tests {
         .unwrap();
 
         assert_eq!(connected.protocol, super::super::ConnectionProtocol::Http1);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn forcing_http1_replaces_even_a_custom_h2_alpn_policy() {
+        let config = ClientTlsConfigBuilder::new().build().unwrap();
+        let mut connector = Connector::with_tls_config(config);
+        connector.force_http1();
+        assert_eq!(connector.tls.alpn_protocols, vec![b"http/1.1".to_vec()]);
     }
 
     #[cfg(feature = "tls")]

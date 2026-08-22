@@ -52,6 +52,7 @@ impl Key for String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Protocol {
     Auto,
+    Http1,
     Http2,
 }
 

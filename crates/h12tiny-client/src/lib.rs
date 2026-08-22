@@ -29,6 +29,7 @@ use h12tiny_core::runtime::{AsyncIoTimer, BoxExecutor, BoxSendFuture};
 
 pub use connect::{
     Connected, ConnectionIo, Connector, ConnectorBuilder, DialError, DialFuture, Dialer,
+    TcpConnected, TcpConnectionIo, TcpDialFuture, TcpDialer,
 };
 #[cfg(feature = "tls")]
 pub use connect::ClientTlsConfigBuilder;
@@ -669,6 +670,9 @@ where
         if connected.protocol == ConnectionProtocol::Http2
             && self.config.protocol != PoolProtocol::Http2
         {
+            if self.config.protocol == PoolProtocol::Http1 {
+                return Err(Error::new(ErrorKind::Alpn));
+            }
             connecting = connecting
                 .alpn_h2(&self.pool)
                 .ok_or_else(|| Error::new(ErrorKind::Canceled))?;
@@ -936,6 +940,9 @@ impl Builder {
 
     pub fn connector(&mut self, connector: Connector) -> &mut Self {
         self.connector = connector;
+        if self.config.protocol == PoolProtocol::Http1 {
+            self.connector.force_http1();
+        }
         self
     }
 
@@ -978,6 +985,17 @@ impl Builder {
         self
     }
 
+    /// Restricts this client to HTTP/1.1 connections and TLS ALPN.
+    ///
+    /// The policy retains the H1 per-origin pool. It also overrides a custom
+    /// TLS configuration's ALPN offerings so an HTTPS peer cannot select H2.
+    #[cfg(feature = "http1")]
+    pub fn http1_only(&mut self) -> &mut Self {
+        self.config.protocol = PoolProtocol::Http1;
+        self.connector.force_http1();
+        self
+    }
+
     #[cfg(feature = "http2")]
     pub fn http2_only(&mut self, enabled: bool) -> &mut Self {
         self.config.protocol = if enabled {
@@ -997,10 +1015,14 @@ impl Builder {
     }
 
     pub fn build<B>(self) -> Client<B> {
+        let mut connector = self.connector;
+        if self.config.protocol == PoolProtocol::Http1 {
+            connector.force_http1();
+        }
         let debug_events = self.debug_events;
         Client {
             config: self.config,
-            connector: self.connector,
+            connector,
             executor: self.executor.clone(),
             #[cfg(feature = "http1")]
             h1_builder: self.h1_builder,

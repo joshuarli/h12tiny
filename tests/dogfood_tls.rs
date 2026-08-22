@@ -14,11 +14,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_net::TcpListener;
+use async_net::{TcpListener, TcpStream};
 use bytes::Bytes;
 use futures_rustls::TlsAcceptor;
 use futures_util::future::{self, Either};
-use h12tiny::client::{Client, Connector, ErrorKind};
+use h12tiny::client::{
+    Client, Connector, ErrorKind, TcpConnected, TcpDialFuture, TcpDialer,
+};
 use h12tiny::runtime::BoxExecutor;
 use h12tiny::server::conn::auto;
 use http::header::CONTENT_LENGTH;
@@ -33,6 +35,22 @@ use support::{
 #[derive(Clone)]
 struct EchoService {
     counters: ConnectionCounters,
+}
+
+#[derive(Clone, Copy)]
+struct FixtureTcpDialer;
+
+impl TcpDialer for FixtureTcpDialer {
+    fn connect(&self, origin: http::Uri) -> TcpDialFuture {
+        let host = origin.host().expect("fixture origin has host").to_owned();
+        let port = origin.port_u16().expect("fixture origin has port");
+        Box::pin(async move {
+            TcpStream::connect(format!("{host}:{port}"))
+                .await
+                .map(TcpConnected::new)
+                .map_err(|error| Box::new(error) as _)
+        })
+    }
 }
 
 impl Service<Request<Incoming>> for EchoService {
@@ -86,7 +104,10 @@ fn tls_alpn_http11_validates_fixture_certificate_and_streams_bodies() {
                 .unwrap();
         });
 
-        let connector = Connector::with_tls_config(fixture_client_config());
+        let connector = Connector::builder()
+            .tcp_dialer(FixtureTcpDialer)
+            .tls_config(fixture_client_config())
+            .build();
         let mut builder = Client::builder(SmolExecutor);
         builder.connector(connector);
         let client = builder.build::<YieldingBody>();
@@ -122,6 +143,61 @@ fn tls_alpn_http11_validates_fixture_certificate_and_streams_bodies() {
 }
 
 #[test]
+fn h1_only_tls_policy_selects_http11_when_fixture_offers_h2() {
+    smol::block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let counters = ConnectionCounters::default();
+        let server_counters = counters.clone();
+        let server = smol::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            server_counters.tcp_opened();
+            let tls = TlsAcceptor::from(Arc::new(fixture_server_config()))
+                .accept(stream)
+                .await
+                .unwrap();
+            assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"http/1.1"[..]));
+            server_counters.tls_completed();
+            server_counters.h1_opened();
+            auto::Builder::new(BoxExecutor::new(SmolExecutor))
+                .serve_tls_connection(
+                    tls,
+                    EchoService {
+                        counters: server_counters.clone(),
+                    },
+                )
+                .unwrap()
+                .await
+                .unwrap();
+        });
+
+        let connector = Connector::builder()
+            .tcp_dialer(FixtureTcpDialer)
+            .tls_config(fixture_client_config())
+            .build();
+        let mut builder = Client::builder(SmolExecutor);
+        builder.connector(connector).http1_only();
+        let client = builder.build::<FullBody>();
+        for body in [b"one".as_slice(), b"two".as_slice()] {
+            let response = client
+                .request(
+                    Request::post(format!("https://localhost:{port}/h1-only"))
+                        .body(FullBody::from_bytes(Bytes::copy_from_slice(body)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(collect(response.into_body()).await, [b"echo:".as_slice(), body].concat());
+        }
+        drop(client);
+        server.await;
+        assert_eq!(counters.snapshot().h1_connections, 1);
+        assert_eq!(counters.snapshot().h2_sessions, 0);
+    });
+}
+
+#[test]
 fn concurrent_first_tls_h2_requests_share_one_handshake_and_session() {
     smol::block_on(async {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -150,7 +226,10 @@ fn concurrent_first_tls_h2_requests_share_one_handshake_and_session() {
                 .unwrap();
         });
 
-        let connector = Connector::with_tls_config(fixture_client_config());
+        let connector = Connector::builder()
+            .tcp_dialer(FixtureTcpDialer)
+            .tls_config(fixture_client_config())
+            .build();
         let mut builder = Client::builder(SmolExecutor);
         builder.connector(connector).http2_only(true);
         let client = builder.build::<FullBody>();
