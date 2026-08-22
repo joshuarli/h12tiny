@@ -695,10 +695,11 @@ impl Connector {
 
 /// Races resolved TCP candidates without committing the client to a runtime.
 ///
-/// The first candidate starts immediately. Later candidates are launched
-/// after `happy_eyeballs_timeout`, or immediately after a failed attempt. The
-/// returned vector has already been family-interleaved so an address family
-/// that stalls cannot indefinitely delay the other family.
+/// The first candidate starts immediately. When both address families are
+/// present, later candidates are launched after `happy_eyeballs_timeout`, or
+/// immediately after a failed attempt. Single-family results remain serial,
+/// avoiding speculative duplicate connections with no alternate family to
+/// prefer.
 async fn connect_resolved_addresses(
     addresses: Vec<SocketAddr>,
     happy_eyeballs_timeout: Option<Duration>,
@@ -707,7 +708,7 @@ async fn connect_resolved_addresses(
     let addresses = interleave_address_families(addresses);
     let mut last_error = None;
 
-    if happy_eyeballs_timeout.is_none() {
+    if happy_eyeballs_timeout.is_none() || !has_both_address_families(&addresses) {
         for address in addresses {
             match Async::<StdTcpStream>::connect(address).await {
                 Ok(stream) => return Ok(stream),
@@ -782,6 +783,12 @@ fn interleave_address_families(addresses: Vec<SocketAddr>) -> Vec<SocketAddr> {
     }
     interleaved.extend(ipv4);
     interleaved
+}
+
+fn has_both_address_families(addresses: &[SocketAddr]) -> bool {
+    let has_ipv6 = addresses.iter().any(SocketAddr::is_ipv6);
+    let has_ipv4 = addresses.iter().any(SocketAddr::is_ipv4);
+    has_ipv6 && has_ipv4
 }
 
 fn socket_addresses(stream: &Async<StdTcpStream>) -> (Option<SocketAddr>, Option<SocketAddr>) {
@@ -1176,6 +1183,17 @@ mod tests {
             super::interleave_address_families(vec![v4_one, v4_two, v6_one, v6_two]),
             vec![v6_one, v4_one, v6_two, v4_two]
         );
+    }
+
+    #[test]
+    fn happy_eyeballs_races_only_mixed_address_families() {
+        let v4_one: SocketAddr = "127.0.0.1:80".parse().unwrap();
+        let v4_two: SocketAddr = "127.0.0.2:80".parse().unwrap();
+        let v6_one: SocketAddr = "[::1]:80".parse().unwrap();
+
+        assert!(super::has_both_address_families(&[v6_one, v4_one]));
+        assert!(!super::has_both_address_families(&[v4_one, v4_two]));
+        assert!(!super::has_both_address_families(&[v6_one]));
     }
 
     #[cfg(feature = "tls")]
