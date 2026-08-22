@@ -22,7 +22,7 @@ websocket = ["upgrade", "dep:base64", "dep:fastwebsockets", "dep:futures-lite", 
 async-io = { workspace = true }
 base64 = { version = "0.22", optional = true }
 bytes = { workspace = true }
-fastwebsockets = { package = "laputa-fastwebsockets-futures-lite", path = "../../../fastwebsockets-futures-lite", optional = true }
+fastwebsockets = { package = "laputa-fastwebsockets-futures-lite", version = "0.10", optional = true }
 futures-lite = { workspace = true, optional = true }
 futures-util = { workspace = true }
 h12tiny-core = { path = "../h12tiny-core", default-features = false, optional = true }
