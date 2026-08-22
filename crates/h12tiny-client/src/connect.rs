@@ -163,8 +163,8 @@ pub type ResolveFuture =
 
 /// Resolves one direct-origin host and port into candidate socket addresses.
 ///
-/// h12tiny starts connection attempts in the returned order, interleaving
-/// IPv6 and IPv4 candidates and racing later candidates after the configured
+/// h12tiny preserves order within each address family, starts IPv6 first when
+/// both families are present, and races later candidates after the configured
 /// Happy Eyeballs delay. A resolver is used only by the default TCP path;
 /// [`Dialer`] and [`TcpDialer`] retain complete ownership of their own name
 /// resolution and socket policy.
@@ -756,28 +756,24 @@ fn no_connected_address(last_error: Option<io::Error>) -> io::Error {
 }
 
 fn interleave_address_families(addresses: Vec<SocketAddr>) -> Vec<SocketAddr> {
-    let Some(first) = addresses.first() else {
-        return addresses;
-    };
-    let first_is_ipv6 = first.is_ipv6();
-    let mut first_family = VecDeque::new();
-    let mut second_family = VecDeque::new();
+    let mut ipv6 = VecDeque::new();
+    let mut ipv4 = VecDeque::new();
     for address in addresses {
-        if address.is_ipv6() == first_is_ipv6 {
-            first_family.push_back(address);
+        if address.is_ipv6() {
+            ipv6.push_back(address);
         } else {
-            second_family.push_back(address);
+            ipv4.push_back(address);
         }
     }
 
-    let mut interleaved = Vec::with_capacity(first_family.len() + second_family.len());
-    while let Some(address) = first_family.pop_front() {
+    let mut interleaved = Vec::with_capacity(ipv6.len() + ipv4.len());
+    while let Some(address) = ipv6.pop_front() {
         interleaved.push(address);
-        if let Some(address) = second_family.pop_front() {
+        if let Some(address) = ipv4.pop_front() {
             interleaved.push(address);
         }
     }
-    interleaved.extend(second_family);
+    interleaved.extend(ipv4);
     interleaved
 }
 
@@ -1121,7 +1117,7 @@ mod tests {
         );
         assert_eq!(
             super::interleave_address_families(vec![v4_one, v4_two, v6_one, v6_two]),
-            vec![v4_one, v6_one, v4_two, v6_two]
+            vec![v6_one, v4_one, v6_two, v4_two]
         );
     }
 
